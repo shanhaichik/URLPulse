@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { expect, test } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { checkUrl } from '../src/server/checker.js';
@@ -160,18 +161,27 @@ test.each(['baseline', 'fallback baseline', 'current'] as const)('keeps all 1305
   const { join } = await import('node:path');
   const { openReportRows } = await import('../src/server/export.js');
   const dir = mkdtempSync(join(tmpdir(), 'pulse-export-snapshot-'));
-  const store = new Store(join(dir, 'pulse.sqlite3'));
+  const file = join(dir, 'pulse.sqlite3');
+  let now = Date.parse('2026-11-20T09:00:00.000Z');
+  const store = new Store(file, () => ++now);
+  const fixture = new DatabaseSync(file);
   try {
     const project = store.createProject('Снимок', '');
     store.addUrls(project.id, Array.from({ length: 1305 }, (_, i) => ({ input: 'example.com/row/' + i, line: i + 1 })));
     const complete = (httpCode: number) => {
       const run = store.enqueue(project.id);
-      const first = store.claim()!;
-      for (let rows = first.items; rows.length; rows = store.pendingResults(run.id)) {
-        for (const item of rows) store.saveResult(item.id, { status: httpCode === 200 ? 'ok' : 'error', httpCode,
-          durationMs: 12, finalUrl: item.url, redirects: 0, contentType: null, contentLength: null,
-          errorKind: httpCode === 200 ? null : 'http', error: httpCode === 200 ? null : 'HTTP 503' });
-      }
+      expect(store.claim()?.id).toBe(run.id);
+      const ok = httpCode === 200;
+      // Seed the snapshot in one transaction to keep per-result disk syncs out of this export test.
+      fixture.exec('BEGIN IMMEDIATE');
+      const { changes } = fixture.prepare(`UPDATE results
+        SET status=?,http_code=?,duration_ms=12,final_url=url,redirects=0,error_kind=?,error=?,checked_at=?
+        WHERE run_id=? AND status='pending'`).run(ok ? 'ok' : 'error', httpCode, ok ? null : 'http',
+        ok ? null : 'HTTP 503', new Date(++now).toISOString(), run.id);
+      const completed = Number(changes);
+      fixture.prepare('UPDATE runs SET completed=?,available=?,failures=? WHERE id=?')
+        .run(completed, ok ? completed : 0, ok ? 0 : completed, run.id);
+      fixture.exec('COMMIT');
       store.finish(run.id);
       return run.id;
     };
@@ -192,7 +202,7 @@ test.each(['baseline', 'fallback baseline', 'current'] as const)('keeps all 1305
     expect(results).toHaveLength(1305);
     expect(new Set(results.map(row => row.id)).size).toBe(1305);
     expect(results.every(row => row.previousHttpCode === 200)).toBe(true);
-  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { fixture.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('reports and exports regressions when the nearest completed run skipped the URL', async () => {

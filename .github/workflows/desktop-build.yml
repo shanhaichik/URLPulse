@@ -20,7 +20,7 @@ jobs:
             build: npm run make:windows
             name: windows-x64
             folder: installers
-          - os: macos-15
+          - os: macos-26
             build: npm run make:mac -- --arch=arm64
             name: macos-arm64
             folder: make/dmg/arm64
@@ -42,12 +42,8 @@ jobs:
           node-version: '24.22.3'
           cache: npm
       - run: npm ci
-      - name: Run unit tests (Windows)
-        if: runner.os == 'Windows'
+      - name: Run unit tests
         run: npm test -- --maxWorkers=2 --testTimeout=20000
-      - name: Run unit tests (macOS)
-        if: runner.os == 'macOS'
-        run: npm test
       - if: runner.os == 'Windows'
         run: choco install nsis --yes --no-progress
       - run: ${{ matrix.build }}
