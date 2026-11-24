@@ -44,7 +44,7 @@ FunctionEnd
 Section "Pulse URL"
   SetShellVarContext current
   SetOutPath "$INSTDIR"
-  File /r "${APP_FOLDER}/*.*"
+  File /r "${APP_FILES}"
   CreateDirectory "$SMPROGRAMS\Pulse URL"
   CreateShortCut "$SMPROGRAMS\Pulse URL\Pulse URL.lnk" "$INSTDIR\Pulse URL.exe"
   WriteUninstaller "$INSTDIR\Uninstall.exe"

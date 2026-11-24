@@ -1,9 +1,11 @@
+import { DatabaseSync } from 'node:sqlite';
 import { expect, test } from 'vitest';
 import { createApp } from '../src/server/app.js';
 import { checkUrl } from '../src/server/checker.js';
 import { reportFile } from '../src/server/export.js';
 import { desktopRequest } from '../src/desktop/contracts.js';
 import { Store } from '../src/server/store.js';
+import { seedCompletedRun } from './fixtures/run-results.js';
 
 const inspect = (headers: { server: string; 'www-authenticate'?: string }) => checkUrl('https://example.com/', {
   resolve: async () => [{ address: '93.184.216.34', family: 4 }],
@@ -160,18 +162,17 @@ test.each(['baseline', 'fallback baseline', 'current'] as const)('keeps all 1305
   const { join } = await import('node:path');
   const { openReportRows } = await import('../src/server/export.js');
   const dir = mkdtempSync(join(tmpdir(), 'pulse-export-snapshot-'));
-  const store = new Store(join(dir, 'pulse.sqlite3'));
+  const file = join(dir, 'pulse.sqlite3');
+  let now = Date.parse('2026-11-20T09:00:00.000Z');
+  const store = new Store(file, () => ++now);
+  const fixture = new DatabaseSync(file);
   try {
     const project = store.createProject('Снимок', '');
     store.addUrls(project.id, Array.from({ length: 1305 }, (_, i) => ({ input: 'example.com/row/' + i, line: i + 1 })));
     const complete = (httpCode: number) => {
       const run = store.enqueue(project.id);
-      const first = store.claim()!;
-      for (let rows = first.items; rows.length; rows = store.pendingResults(run.id)) {
-        for (const item of rows) store.saveResult(item.id, { status: httpCode === 200 ? 'ok' : 'error', httpCode,
-          durationMs: 12, finalUrl: item.url, redirects: 0, contentType: null, contentLength: null,
-          errorKind: httpCode === 200 ? null : 'http', error: httpCode === 200 ? null : 'HTTP 503' });
-      }
+      expect(store.claim()?.id).toBe(run.id);
+      seedCompletedRun(fixture, run.id, httpCode, new Date(++now).toISOString());
       store.finish(run.id);
       return run.id;
     };
@@ -192,7 +193,7 @@ test.each(['baseline', 'fallback baseline', 'current'] as const)('keeps all 1305
     expect(results).toHaveLength(1305);
     expect(new Set(results.map(row => row.id)).size).toBe(1305);
     expect(results.every(row => row.previousHttpCode === 200)).toBe(true);
-  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { fixture.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('reports and exports regressions when the nearest completed run skipped the URL', async () => {
