@@ -31,6 +31,16 @@ async function routeReads(page: Page, app: ReturnType<typeof createApp>) {
   });
 }
 
+async function closeRoutedApp(page: Page, app: ReturnType<typeof createApp>, store: Store) {
+  try {
+    // Polling requests can still be in flight after the last UI assertion.
+    await page.unrouteAll({ behavior: 'wait' });
+  } finally {
+    try { await app.close(); }
+    finally { store.close(); }
+  }
+}
+
 test('keeps edits made during a project save as an unsaved draft', async ({ page, request }) => {
   const { id } = await (await request.post('/api/projects', { data: { name: 'Изменения во время сохранения' } })).json();
   let release!: () => void;
@@ -111,8 +121,7 @@ test('updates the delivery and removes deleted reports while notification histor
     await expect(pagination.getByText('Страница 1')).toBeVisible();
     await expect(pagination.getByRole('button', { name: 'Следующая страница' })).toBeDisabled();
   } finally {
-    await app.close();
-    store.close();
+    await closeRoutedApp(page, app, store);
   }
 });
 
@@ -134,8 +143,7 @@ test('shows the global schedule pause in project settings in place of the next d
     await expect(page.getByText('Следующий запуск', { exact: false })).toBeVisible();
     await expect(page.getByText('Расписание проекта на паузе.', { exact: false })).toHaveCount(0);
   } finally {
-    await app.close();
-    store.close();
+    await closeRoutedApp(page, app, store);
   }
 });
 
@@ -160,7 +168,6 @@ test('shows an interrupted email and its persisted attempt count in the notifica
     await expect(entry.getByText(/Доставка не подтверждена/)).toBeVisible();
     await expect(entry.getByText('Попыток отправки: 1', { exact: true })).toBeVisible();
   } finally {
-    await app.close();
-    store.close();
+    await closeRoutedApp(page, app, store);
   }
 });
