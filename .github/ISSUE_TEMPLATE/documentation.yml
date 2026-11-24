@@ -1,0 +1,22 @@
+name: Documentation issue
+description: Report missing, unclear, or outdated URLPulse documentation.
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Page or section
+      description: Share the repository path or a link to the relevant section.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What needs to change?
+      description: Describe what you were trying to do and what is missing, unclear, or outdated.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested correction
+      description: Include the app version, command, or wording if you have checked a correction. Keep private URLs and credentials out of examples.

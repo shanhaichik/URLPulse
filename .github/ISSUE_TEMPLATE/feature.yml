@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an improvement to a URLPulse workflow.
+body:
+  - type: markdown
+    attributes:
+      value: Use synthetic examples and redact private URLs, credentials, and personal data from any attachments.
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow and problem
+      description: Describe what you are trying to do and where the current workflow gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe what you would like to be able to do.
+    validations:
+      required: true
+  - type: textarea
+    id: workarounds
+    attributes:
+      label: Current workaround
+      description: Share any approach you already use and its limitations.

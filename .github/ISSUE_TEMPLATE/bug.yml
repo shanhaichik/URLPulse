@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a problem you encountered while using URLPulse.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic URLs and projects. Remove credentials, access links, private hosts, SMTP settings, and personal data from logs, exports, and screenshots. For vulnerabilities, see the [security policy](https://github.com/shanhaichik/URLPulse/security/policy).
+  - type: input
+    id: version
+    attributes:
+      label: URLPulse version
+      placeholder: "Example: 1.5.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and run mode
+      description: Include the OS version, CPU architecture, and whether you used Electron or the browser. For the browser, include its name and version.
+      placeholder: "Example: macOS 15, arm64, Electron"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Describe the setup and the shortest sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include any relevant, redacted error messages or screenshots.
+    validations:
+      required: true
