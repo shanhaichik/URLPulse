@@ -27,7 +27,7 @@ npm start
 
 Open the private access link printed in the terminal. The interface is in Russian. Choose **Новый проект** (New project), **Добавить URL** (Add URLs), and paste addresses one per line. Click **Проверить проект** (Check project) and open the results in **Журнал запусков** (Run history). Keep the process running for scheduled checks.
 
-Version 1.5.0 is prepared as a source-only release. Use `npm run desktop` to launch Electron from source after `npm ci`. The [desktop build guide](docs/development/README.md) covers macOS Apple Silicon, macOS Intel, and Windows x64 installers.
+The current GitHub release contains source archives. Use `npm run desktop` to launch Electron from source after `npm ci`. The [desktop build guide](docs/development/README.md) covers macOS Apple Silicon, macOS Intel, and Windows x64 installers.
 
 ## See it in action
 
