@@ -1,0 +1,62 @@
+name: Desktop checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Test desktop (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            build: npm run make:windows
+            name: windows-x64
+            folder: installers
+          - os: macos-15
+            build: npm run make:mac -- --arch=arm64
+            name: macos-arm64
+            folder: make/dmg/arm64
+          - os: macos-15-intel
+            build: npm run make:mac -- --arch=x64
+            name: macos-x64
+            folder: make/dmg/x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PULSE_PUBLIC_RELEASE: '0'
+      PULSE_PACKAGE_OUT: out/desktop-ci
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.22.3'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - if: runner.os == 'Windows'
+        run: choco install nsis --yes --no-progress
+      - run: ${{ matrix.build }}
+      - if: runner.os == 'macOS'
+        shell: bash
+        run: bash packaging/smoke-macos.sh "$PULSE_PACKAGE_OUT/${{ matrix.folder }}"
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/smoke-windows.ps1 "$env:PULSE_PACKAGE_OUT/${{ matrix.folder }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pulse-url-test-${{ matrix.name }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PULSE_PACKAGE_OUT }}/${{ matrix.folder }}/*.exe
+            ${{ env.PULSE_PACKAGE_OUT }}/${{ matrix.folder }}/*.dmg
+            ${{ env.PULSE_PACKAGE_OUT }}/${{ matrix.folder }}/SHA256SUMS.txt
+          if-no-files-found: error

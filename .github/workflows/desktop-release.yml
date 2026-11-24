@@ -1,0 +1,118 @@
+name: Signed desktop release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA on the protected default branch, tagged vX.Y.Z
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release
+
+jobs:
+  verify-source:
+    name: Verify tagged release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PULSE_SOURCE_SHA: ${{ inputs.source_sha }}
+      PULSE_TRUSTED_REF: refs/heads/${{ github.event.repository.default_branch }}
+      PULSE_REF_PROTECTED: ${{ github.ref_protected && 'true' || 'false' }}
+    steps:
+      - name: Require the protected default branch
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "$PULSE_TRUSTED_REF" || "$PULSE_REF_PROTECTED" != 'true' ]]; then
+            echo 'Dispatch this workflow from the protected default branch.' >&2
+            exit 1
+          fi
+          if [[ ! "$PULSE_SOURCE_SHA" =~ ^[a-f0-9]{40}$ || "$PULSE_SOURCE_SHA" != "$GITHUB_SHA" ]]; then
+            echo 'Use the full commit SHA of the tagged workflow run.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.22.3'
+          package-manager-cache: false
+      - run: node packaging/release.cjs source
+      - run: npm ci
+      - run: npm test
+
+  package:
+    name: Sign and verify (${{ matrix.name }})
+    needs: verify-source
+    if: github.event_name == 'workflow_dispatch' && github.ref_protected && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: desktop-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            labels: '["self-hosted","Windows","X64"]'
+            folder: installers
+          - name: macos-arm64
+            labels: '["self-hosted","macOS","ARM64"]'
+            folder: make/dmg/arm64
+            arch: arm64
+          - name: macos-x64
+            labels: '["self-hosted","macOS","X64"]'
+            folder: make/dmg/x64
+            arch: x64
+    runs-on:
+      group: pulse-signing
+      labels: ${{ fromJSON(matrix.labels) }}
+    timeout-minutes: 60
+    env:
+      PULSE_PUBLIC_RELEASE: '1'
+      PULSE_PACKAGE_OUT: out/desktop-release-${{ github.run_id }}-${{ github.run_attempt }}
+      PULSE_SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24.22.3'
+          package-manager-cache: false
+      - run: node packaging/release.cjs source
+      - run: npm ci
+      - if: runner.os == 'macOS'
+        run: npm run make:mac -- --arch=${{ matrix.arch }}
+        env:
+          PULSE_MAC_SIGN_IDENTITY: ${{ secrets.PULSE_RELEASE_MAC_SIGN_IDENTITY }}
+          PULSE_MAC_NOTARY_PROFILE: ${{ secrets.PULSE_RELEASE_MAC_NOTARY_PROFILE }}
+      - if: runner.os == 'Windows'
+        run: npm run make:windows
+        env:
+          PULSE_WINDOWS_CERT_THUMBPRINT: ${{ secrets.PULSE_RELEASE_WINDOWS_CERT_THUMBPRINT }}
+          PULSE_WINDOWS_TIMESTAMP_URL: ${{ secrets.PULSE_RELEASE_WINDOWS_TIMESTAMP_URL }}
+      - if: runner.os == 'macOS'
+        shell: bash
+        run: bash packaging/smoke-macos.sh "$PULSE_PACKAGE_OUT/${{ matrix.folder }}"
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/smoke-windows.ps1 "$env:PULSE_PACKAGE_OUT/${{ matrix.folder }}"
+        env:
+          PULSE_WINDOWS_CERT_THUMBPRINT: ${{ secrets.PULSE_RELEASE_WINDOWS_CERT_THUMBPRINT }}
+      - id: artifact
+        run: node packaging/release.cjs record "${{ env.PULSE_PACKAGE_OUT }}/${{ matrix.folder }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pulse-url-release-${{ matrix.name }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.artifact.outputs.installer }}
+            ${{ env.PULSE_PACKAGE_OUT }}/${{ matrix.folder }}/SHA256SUMS.txt
+            ${{ env.PULSE_PACKAGE_OUT }}/${{ matrix.folder }}/release.json
+          if-no-files-found: error
