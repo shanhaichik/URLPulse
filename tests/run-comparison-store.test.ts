@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { expect, test } from 'vitest';
 import { Store } from '../src/server/store.js';
 import type { CheckResult } from '../src/shared/types.js';
+import { seedCompletedRun } from './fixtures/run-results.js';
 
 function run(store: Store, project: number, ids: number[], checks: (Partial<CheckResult> | null)[]) {
   const { id } = store.enqueue(project, ids);
@@ -143,12 +144,21 @@ test('skips an empty historical run when proposing the previous comparison basel
 
 test('pages by address id and keeps one export snapshot during deletion', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pulse-comparison-export-'));
-  const store = new Store(join(dir, 'pulse.sqlite3'));
+  const file = join(dir, 'pulse.sqlite3');
+  const store = new Store(file);
+  const fixture = new DatabaseSync(file);
   try {
     const { id } = store.createProject('Снимок сравнения', '');
     const ids = addresses(store, id, 510);
-    const baseline = run(store, id, ids, ids.map(() => ({})));
-    const target = run(store, id, ids, ids.map(() => ({ httpCode: 204 })));
+    const complete = (httpCode: number) => {
+      const runId = store.enqueue(id, ids).id;
+      expect(store.claim()?.id).toBe(runId);
+      seedCompletedRun(fixture, runId, httpCode, new Date().toISOString());
+      store.finish(runId);
+      return runId;
+    };
+    const baseline = complete(200);
+    const target = complete(204);
     const pair = { baseline, target, kind: 'httpChanged' as const };
     const page = store.comparisonPage(id, pair);
     expect(page.items.map(row => row.urlId)).toEqual(ids.slice(0, 100));
@@ -161,5 +171,5 @@ test('pages by address id and keeps one export snapshot during deletion', async 
     expect(store.readComparisonExport(snapshot.id, head.at(-1)!.urlId).map(row => row.urlId)).toEqual(ids.slice(500));
     store.endComparisonExport(snapshot.id);
     expect(() => store.readComparisonExport(snapshot.id, 0)).toThrow('Снимок сравнения закрыт');
-  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { fixture.close(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });

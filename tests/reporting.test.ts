@@ -5,6 +5,7 @@ import { checkUrl } from '../src/server/checker.js';
 import { reportFile } from '../src/server/export.js';
 import { desktopRequest } from '../src/desktop/contracts.js';
 import { Store } from '../src/server/store.js';
+import { seedCompletedRun } from './fixtures/run-results.js';
 
 const inspect = (headers: { server: string; 'www-authenticate'?: string }) => checkUrl('https://example.com/', {
   resolve: async () => [{ address: '93.184.216.34', family: 4 }],
@@ -171,17 +172,7 @@ test.each(['baseline', 'fallback baseline', 'current'] as const)('keeps all 1305
     const complete = (httpCode: number) => {
       const run = store.enqueue(project.id);
       expect(store.claim()?.id).toBe(run.id);
-      const ok = httpCode === 200;
-      // Seed the snapshot in one transaction to keep per-result disk syncs out of this export test.
-      fixture.exec('BEGIN IMMEDIATE');
-      const { changes } = fixture.prepare(`UPDATE results
-        SET status=?,http_code=?,duration_ms=12,final_url=url,redirects=0,error_kind=?,error=?,checked_at=?
-        WHERE run_id=? AND status='pending'`).run(ok ? 'ok' : 'error', httpCode, ok ? null : 'http',
-        ok ? null : 'HTTP 503', new Date(++now).toISOString(), run.id);
-      const completed = Number(changes);
-      fixture.prepare('UPDATE runs SET completed=?,available=?,failures=? WHERE id=?')
-        .run(completed, ok ? completed : 0, ok ? 0 : completed, run.id);
-      fixture.exec('COMMIT');
+      seedCompletedRun(fixture, run.id, httpCode, new Date(++now).toISOString());
       store.finish(run.id);
       return run.id;
     };
