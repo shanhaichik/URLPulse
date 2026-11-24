@@ -6,7 +6,7 @@ URLPulse has a Russian interface. The labels in these instructions match the con
 
 ## Start URLPulse and run a check
 
-Version 1.5.0 is a source-only release. Install Node.js 24.x and start the app from a terminal.
+To run URLPulse from source, install Node.js 24.x and start the app from a terminal.
 
 ```bash
 git clone https://github.com/shanhaichik/URLPulse.git
@@ -20,9 +20,7 @@ Open the full URL printed in the terminal. The server listens on `127.0.0.1:8731
 
 To run Electron from source, run `npm run desktop` after `npm ci`. Closing the window leaves the app running. Choose **Открыть Пульс URL** to reopen the window or **Выход** to quit from the system tray or menu bar. For local unsigned installers, see [Development and packaging](../development/README.md).
 
-Native Windows checks were waived for the source release. The full Intel smoke test under Rosetta stopped at a PAC timeout.
-
-To install a package you built locally, open the DMG on macOS and drag **Pulse URL** to Applications. On Windows x64, run `Pulse-URL-1.5.0-win-x64-Setup.exe` and open **Pulse URL** from the Start menu.
+To install a package you built locally, open the DMG on macOS and drag **Pulse URL** to Applications. On Windows x64, run the generated `Pulse-URL-<version>-win-x64-Setup.exe` and open **Pulse URL** from the Start menu.
 
 1. Choose **Новый проект**, enter a name, and select **Создать проект**.
 2. Select **Добавить URL → Список URL**. Paste `https://example.com/` and `https://example.org/`, one address per line. Choose **Добавить адреса**, then **Готово**.
