@@ -1,0 +1,94 @@
+name: Source release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (vX.Y.Z)
+        required: true
+        type: string
+      publish:
+        description: Publish a GitHub Release after validation
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify the tagged commit and CI
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      commit: ${{ steps.check.outputs.commit }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify version and successful main workflows
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Use an existing vX.Y.Z tag.' >&2
+            exit 1
+          fi
+          commit=$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
+          if ! git merge-base --is-ancestor "$commit" "$GITHUB_SHA"; then
+            echo 'The tagged commit must be on the default branch.' >&2
+            exit 1
+          fi
+          version=$(git show "$commit:package.json" | jq -er '.version')
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo 'The tag must match the version in package.json.' >&2
+            exit 1
+          fi
+          for workflow in tests.yml desktop-build.yml; do
+            conclusion=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
+              -f head_sha="$commit" -f branch="$DEFAULT_BRANCH" -f event=push -F per_page=1 \
+              --jq '.workflow_runs[0].conclusion // "missing or pending"')
+            if [[ "$conclusion" != success ]]; then
+              printf '%s for %s: %s\n' "$workflow" "$commit" "$conclusion" >&2
+              exit 1
+            fi
+          done
+          printf 'tag=%s\ncommit=%s\n' "$RELEASE_TAG" "$commit" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish source archives
+    needs: verify
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release for the verified tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.commit }}
+        run: |
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$RELEASE_TAG" --jq .sha)
+          if [[ "$commit" != "$EXPECTED_COMMIT" ]]; then
+            echo 'The release tag moved after verification.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "URLPulse ${RELEASE_TAG#v}" --generate-notes
