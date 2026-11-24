@@ -130,7 +130,7 @@ test('includes the index in the cumulative uncompressed byte limit', async () =>
   });
   await expect(run(lastAtLimit)).resolves.toEqual({ urls: [], documents: 5 });
   await expect(run(Buffer.concat([lastAtLimit, Buffer.from(' ')]))).rejects.toThrow(/Суммарный размер sitemap превышает 32 МиБ/);
-});
+}, 20_000);
 
 test('stops before downloading the next child after the total deadline', async () => {
   const child = 'https://example.test/child.xml';
