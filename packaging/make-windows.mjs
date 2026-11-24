@@ -54,7 +54,7 @@ const compiler = process.env.PULSE_MAKENSIS || (existsSync(windowsCompiler) ? wi
 const option = process.platform === 'win32' ? '/' : '-';
 run(compiler, [
   option + 'V2', option + 'INPUTCHARSET', 'UTF8',
-  option + 'DAPP_FOLDER=' + folder, option + 'DOUTPUT_EXE=' + installer,
+  option + 'DAPP_FILES=' + join(folder, '*.*'), option + 'DOUTPUT_EXE=' + installer,
   option + 'DAPP_VERSION=' + manifest.version, option + 'DUNINSTALL_FILES=' + uninstaller,
   option + 'DAPP_ICON=' + fileURLToPath(new URL('../desktop-assets/pulse-icon.ico', import.meta.url)),
   resolve('packaging', 'windows.nsi'),

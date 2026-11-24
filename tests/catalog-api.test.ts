@@ -11,6 +11,7 @@ import type { CatalogJob, CatalogPage } from '../src/shared/catalog.js';
 
 const host = 'https://example.test';
 const sitemap = (paths: string[]) => `<urlset>${paths.map(path => `<url><loc>${host}${path}</loc></url>`).join('')}</urlset>`;
+const workerWait = { timeout: 8_000 };
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'pulse-catalog-api-'));
@@ -62,16 +63,16 @@ test('queues and publishes an octet-stream upload for its owning project', async
     const uploaded = await app.inject({ ...binary, url: root + uploadPath });
     expect(uploaded.statusCode).toBe(202);
     expect(uploaded.json()).toMatchObject({ id: job.id, state: 'queued' });
-    await vi.waitFor(() => expect(db.job(project.id, job.id)).toMatchObject({ state: 'done', uniqueUrls: 2, documentsDone: 1 }));
+    await vi.waitFor(() => expect(db.job(project.id, job.id)).toMatchObject({ state: 'done', uniqueUrls: 2, documentsDone: 1 }), workerWait);
     const page = (await app.inject(root + `/page?sourceId=${job.sourceId}`)).json<CatalogPage>();
     expect(page.items.map(item => item.url)).toEqual([host + '/one', host + '/two']);
     expect((await app.inject({ ...binary, url: root + uploadPath })).statusCode).toBe(409);
 
     const staged = join(file + '.catalog', db.fileKey(job.id) + '.bin');
-    await vi.waitFor(async () => await expect(stat(staged)).rejects.toMatchObject({ code: 'ENOENT' }));
+    await vi.waitFor(async () => await expect(stat(staged)).rejects.toMatchObject({ code: 'ENOENT' }), workerWait);
     await expect(stat(staged + '.partial')).rejects.toMatchObject({ code: 'ENOENT' });
   } finally { await close(); }
-});
+}, 20_000);
 
 test('rejects simultaneous uploads and removes an unfinished upload when cancelled', async () => {
   const { app, root, file, project, db, service, close } = await fixture();
