@@ -20,7 +20,7 @@ jobs:
             build: npm run make:windows
             name: windows-x64
             folder: installers
-          - os: macos-26
+          - os: macos-15
             build: npm run make:mac -- --arch=arm64
             name: macos-arm64
             folder: make/dmg/arm64
