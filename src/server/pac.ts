@@ -176,6 +176,13 @@ function proxyUrl(kind: string, authority: string): string {
   return url.origin;
 }
 
+export function normalizePacProxyUrl(value: unknown): string {
+  const parts = typeof value === 'string' && value.length <= 300
+    ? /^(https?):\/\/([^/]+)\/?$/i.exec(value.trim()) : null;
+  if (!parts) throw new PacError('Укажите схему, хост и порт доверенного прокси.');
+  return proxyUrl(parts[1].toLowerCase() === 'https' ? 'HTTPS' : 'PROXY', parts[2]);
+}
+
 function parseRoutes(result: string): PacRoute[] {
   const entries = result.trim().split(';');
   if (entries.length > 1 && !entries.at(-1)?.trim()) entries.pop();

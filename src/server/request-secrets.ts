@@ -7,6 +7,10 @@ export interface RequestSecrets {
   remove(reference: string): Promise<void>;
 }
 
+export function validRequestSecretValue(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 4096 && !/[\x00-\x1f\x7f]/.test(value);
+}
+
 const environmentAlias = /^PULSE_REQUEST_SECRET_[A-Z0-9_]+$/;
 const desktopReference = /^desktop-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 

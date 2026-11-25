@@ -2,6 +2,10 @@
 
 [Русский](CHANGELOG.md)
 
+## Unreleased
+
+- Project PAC now applies to sitemap imports in URLs and Catalog. Project-specific trusted proxies support corporate IP addresses, hostname CONNECT, and Basic over HTTPS. Catalog jobs capture the PAC revision when queued.
+
 ## 1.6.0
 
 - English and Russian interfaces in the browser and Electron. Switch languages immediately and keep the selection across launches. Electron menus, the tray, and app-provided dialog captions follow the selection.

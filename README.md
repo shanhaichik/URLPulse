@@ -46,7 +46,7 @@ The 12-second demo switches languages with a URL selected, then opens a run comp
 | See what changed | Compare two runs to find new failures, recoveries, changed codes or redirects, and slower responses. |
 | Share findings | Filter results and export a URL history, a run, a project, or a comparison as CSV, CSV for Excel, or JSON. |
 | Choose a language | Switch between English and Russian. Excel reports follow the interface language. Set the email language separately for the installation. |
-| Set up a project | Configure HTTPS trust, request headers, authentication, a proxy or PAC file, and in-app or SMTP notifications. |
+| Set up a project | Configure HTTPS trust, request headers, authentication, trusted PAC proxies for checks and sitemap imports, and in-app or SMTP notifications. |
 
 ## Documentation
 

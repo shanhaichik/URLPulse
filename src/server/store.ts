@@ -15,7 +15,7 @@ import { comparisonCoverage, comparisonRows, comparisonTotals, eligibleCompariso
 import { MAX_PROFILES, profileReferences, type ProfileConfig, type SavedRequestProfile } from './request-profiles.js';
 import { normalizeUrl } from './checker.js';
 import { scopeConfirmation } from './confirmation.js';
-import type { StoredPac } from './pac-config.js';
+import { pacReferences, storedPac, unreferencedPacVersion, type PacVersionRow, type StoredPac } from './pac-config.js';
 import { nextOccurrence } from './schedule.js';
 import { addressRow, groupWhere, latestResultJoin, workingWhere, WorklistView } from './worklist.js';
 import { checkConcurrencyColumn, notificationFields, projectViewTriggers, resultFields, resultRequestColumns, runFields, schema, selectResultFields } from './schema.js';
@@ -50,6 +50,13 @@ const stoppedTargets = `SELECT id AS position,url_id,version,url,label FROM resu
   UNION ALL SELECT position,url_id,version,url,label FROM stopped_run_targets WHERE run_id=?`;
 const runGroupJoin = 'LEFT JOIN work_group_runs g ON g.run_id=r.id';
 const groupedRunFields = `${runFields},g.group_id AS groupId,g.group_name AS groupName`;
+const livePacVersions = `(pac.active=1 OR EXISTS (
+  SELECT 1 FROM runs r WHERE r.project_id=pac.project_id AND r.pac_revision=pac.revision AND r.status IN ('queued','running')
+) OR EXISTS (
+  SELECT 1 FROM catalog_imports i JOIN catalog_sources s ON s.id=i.source_id
+  WHERE s.project_id=pac.project_id AND i.pac_revision=pac.revision
+    AND i.state IN ('upload','queued','running','paused','failed')
+))`;
 type RunRow = Run & { groupId: number | null; groupName: string | null };
 function mapRun({ groupId, groupName, ...run }: RunRow): Run {
   return groupId === null ? run : { ...run, group: { id: groupId, name: groupName! } };
@@ -61,6 +68,7 @@ export class Store {
   private readonly exports = new Map<string, ExportSnapshot & { selection: ExportSelection }>();
   private readonly comparisonExports = new Map<string, ExportSnapshot & { coverage: ComparisonCoverage; filters: ComparisonFilters }>();
   private readonly instance = randomUUID();
+  private readonly retainedSecrets = new Map<string, number>();
 
   constructor(private readonly file: string, private readonly clock = Date.now, recover = true, initialize = true, readOnly = false) {
     this.db = new DatabaseSync(file, { timeout: initialize ? 100 : 5000, readOnly });
@@ -126,6 +134,12 @@ export class Store {
           }
         }
         this.db.exec('CREATE INDEX IF NOT EXISTS project_pac_runs ON runs(project_id,pac_revision) WHERE pac_revision IS NOT NULL');
+        if (!this.all<{ name: string }>('PRAGMA table_info(project_pac_versions)').some(column => column.name === 'proxy_rules')) {
+          this.db.exec("ALTER TABLE project_pac_versions ADD COLUMN proxy_rules TEXT NOT NULL DEFAULT '[]'");
+        }
+        if (!this.all<{ name: string }>('PRAGMA table_info(catalog_imports)').some(column => column.name === 'pac_revision')) {
+          this.db.exec('ALTER TABLE catalog_imports ADD COLUMN pac_revision TEXT');
+        }
         const notificationColumns = new Set(this.all<{ name: string }>('PRAGMA table_info(notifications)').map(column => column.name));
         if (!notificationColumns.has('cleared_at')) {
           this.db.exec('ALTER TABLE notifications ADD COLUMN cleared_at TEXT');
@@ -317,25 +331,27 @@ export class Store {
   }
 
   projectPac(projectId: number) {
-    return this.get<StoredPac>('SELECT filename,revision,source FROM project_pac_versions WHERE project_id=? AND active=1', projectId);
+    const row = this.get<PacVersionRow>('SELECT filename,revision,source,proxy_rules FROM project_pac_versions WHERE project_id=? AND active=1', projectId);
+    return row ? storedPac(row) : undefined;
   }
 
   private discardUnusedPac(projectId: number) {
-    this.db.prepare(`DELETE FROM project_pac_versions AS pac WHERE project_id=? AND active=0 AND NOT EXISTS (
-      SELECT 1 FROM runs r WHERE r.project_id=pac.project_id AND r.pac_revision=pac.revision
-    )`).run(projectId);
+    this.db.prepare(`DELETE FROM project_pac_versions AS pac WHERE project_id=? AND ${unreferencedPacVersion}`).run(projectId);
   }
 
-  savePac(projectId: number, config?: StoredPac) {
+  savePac(projectId: number, config?: StoredPac, expectedRevision?: string) {
     return this.atomic(() => {
       this.requireProject(projectId);
       const active = this.get<{ revision: string }>('SELECT revision FROM project_pac_versions WHERE project_id=? AND active=1', projectId);
+      if (expectedRevision !== undefined && active?.revision !== expectedRevision) {
+        throw new ApiError(409, 'Настройки PAC изменились. Обновите данные и повторите действие.');
+      }
       if (active?.revision === config?.revision) return config;
       this.db.prepare('UPDATE project_pac_versions SET active=0 WHERE project_id=? AND active=1').run(projectId);
       if (config) {
-        this.db.prepare(`INSERT INTO project_pac_versions(project_id,revision,filename,source,active)
-          VALUES (?,?,?,?,1) ON CONFLICT(project_id,revision) DO UPDATE SET active=1`)
-          .run(projectId, config.revision, config.filename, config.source);
+        this.db.prepare(`INSERT INTO project_pac_versions(project_id,revision,filename,source,proxy_rules,active)
+          VALUES (?,?,?,?,?,1) ON CONFLICT(project_id,revision) DO UPDATE SET active=1`)
+          .run(projectId, config.revision, config.filename, config.source, JSON.stringify(config.proxies ?? []));
       }
       this.discardUnusedPac(projectId);
       this.requestSettingsChanged(projectId);
@@ -344,11 +360,11 @@ export class Store {
   }
 
   pacSnapshot(runId: number) {
-    const snapshot = this.get<StoredPac>(`SELECT p.filename,r.pac_revision AS revision,p.source FROM runs r
+    const snapshot = this.get<PacVersionRow>(`SELECT p.filename,r.pac_revision AS revision,p.source,p.proxy_rules FROM runs r
       LEFT JOIN project_pac_versions p ON p.project_id=r.project_id AND p.revision=r.pac_revision
       WHERE r.id=? AND r.pac_revision IS NOT NULL`, runId);
     if (snapshot && snapshot.source === null) throw new Error('Версия PAC для прогона отсутствует в базе.');
-    return snapshot;
+    return snapshot ? storedPac(snapshot) : undefined;
   }
 
   requestProfiles(projectId: number): SavedRequestProfile[] {
@@ -444,11 +460,14 @@ export class Store {
     const runs = this.all<{ request_snapshot: string }>(`SELECT request_snapshot FROM runs
       WHERE project_id=? AND status IN ('queued','running') AND request_snapshot IS NOT NULL`, projectId);
     for (const run of runs) profiles.push(...JSON.parse(run.request_snapshot) as SavedRequestProfile[]);
-    return profiles.flatMap(profileReferences);
+    const pacs = this.all<PacVersionRow>(`SELECT filename,revision,source,proxy_rules FROM project_pac_versions pac
+      WHERE project_id=? AND proxy_rules<>'[]' AND ${livePacVersions}`, projectId);
+    return [...profiles.flatMap(profileReferences), ...pacs.flatMap(pac => pacReferences(storedPac(pac)))];
   }
 
   unusedRequestSecrets(refs: readonly string[]) {
     const unused = new Set(refs);
+    for (const ref of unused) if (this.retainedSecrets.has(ref)) unused.delete(ref);
     if (!unused.size) return [];
     const configs = this.db.prepare(`SELECT config AS value FROM request_profiles
       UNION ALL SELECT p.value FROM runs r JOIN json_each(r.request_snapshot) p
@@ -457,7 +476,27 @@ export class Store {
       for (const ref of profileReferences(JSON.parse(String(value)) as ProfileConfig)) unused.delete(ref);
       if (!unused.size) break;
     }
+    if (unused.size) {
+      const pacs = this.db.prepare(`SELECT filename,revision,source,proxy_rules FROM project_pac_versions pac
+        WHERE proxy_rules<>'[]' AND ${livePacVersions}`).iterate();
+      for (const row of pacs) {
+        for (const ref of pacReferences(storedPac(row as PacVersionRow))) unused.delete(ref);
+        if (!unused.size) break;
+      }
+    }
     return [...unused];
+  }
+
+  retainRequestSecrets(refs: readonly string[]) {
+    const held = new Set(refs);
+    for (const ref of held) this.retainedSecrets.set(ref, (this.retainedSecrets.get(ref) ?? 0) + 1);
+    return () => {
+      for (const ref of held) {
+        const count = this.retainedSecrets.get(ref)!;
+        if (count === 1) this.retainedSecrets.delete(ref);
+        else this.retainedSecrets.set(ref, count - 1);
+      }
+    };
   }
 
   addresses(projectId: number, groupId?: number): Address[] {

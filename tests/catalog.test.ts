@@ -1,21 +1,132 @@
+import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
+import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { desktopRequest } from '../src/desktop/contracts.js';
 import { createApp } from '../src/server/app.js';
 import { Catalog } from '../src/server/catalog/database.js';
 import { runImport } from '../src/server/catalog/importer.js';
 import { CatalogService } from '../src/server/catalog/service.js';
 import { Store } from '../src/server/store.js';
+import * as checker from '../src/server/checker.js';
+import { parsePacFile, withPacProxies } from '../src/server/pac-config.js';
 
 const doc = (rows: string) => '<urlset>' + rows + '</urlset>';
 const item = (path: string, lastmod = '') =>
   '<url><loc>https://sample.test/' + path + '</loc><lastmod>' + lastmod + '</lastmod></url>';
 const input = (body: string | Buffer) => Readable.from([Buffer.from(body)]);
+
+test('uses a queued catalog job’s PAC password reference after changing settings and restarting', async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'pulse-catalog-pac-'));
+  const file = join(folder, 'main.sqlite3');
+  const store = new Store(file);
+  const catalog = new Catalog(file);
+  const url = 'https://public.example/sitemap.xml';
+  const seen: unknown[] = [];
+  const download = vi.spyOn(checker, 'openSitemapStream').mockImplementation(async (location, _tls, signal, network) => {
+    const route = (await network?.pac?.(new URL(location), signal))?.[0];
+    const ref = route?.kind === 'proxy' ? network?.pacProxy?.rules.get(route.url)?.auth?.ref : undefined;
+    seen.push({ route, ref });
+    return input(doc(item('from-pac'))) as Awaited<ReturnType<typeof checker.openSitemapStream>>;
+  });
+  try {
+    const { id } = store.createProject('Catalog PAC', '');
+    const legacy = parsePacFile('office.pac', "function FindProxyForURL() { return 'HTTPS proxy.office.test:9443'; }");
+    const ref = 'PULSE_REQUEST_SECRET_INITIAL';
+    const proxy = { url: 'https://proxy.office.test:9443', allowPrivate: true, connectByHostname: true };
+    const first = withPacProxies(legacy, [{ ...proxy, auth: { username: 'alice', ref } }]);
+    store.savePac(id, first);
+    const job = catalog.create(id, { url });
+    catalog.control(id, job.id, 'pause');
+    store.savePac(id, withPacProxies(legacy, [{ ...proxy, auth: { username: 'bob', ref: 'PULSE_REQUEST_SECRET_ROTATED' } }]));
+    const reopened = new Catalog(file);
+    try {
+      reopened.recover();
+      reopened.control(id, job.id, 'resume');
+      await runImport(reopened, job.id);
+      expect(reopened.job(id, job.id).state).toBe('done');
+    } finally { reopened.close(); }
+    expect(seen).toEqual([{ route: { kind: 'proxy', url: proxy.url }, ref }]);
+  } finally { download.mockRestore(); catalog.close(); store.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test.each(['source', 'catalog'])('drops the disabled PAC revision when deleting its last catalog %s', async scope => {
+  const folder = mkdtempSync(join(tmpdir(), 'pulse-catalog-pac-history-'));
+  const file = join(folder, 'main.sqlite3');
+  const store = new Store(file);
+  const catalog = new Catalog(file);
+  const db = new DatabaseSync(file);
+  try {
+    const { id } = store.createProject('PAC cleanup', '');
+    const config = parsePacFile('office.pac', "function FindProxyForURL() { return 'DIRECT'; }");
+    store.savePac(id, config);
+    const job = catalog.create(id, { url: 'https://sample.test/sitemap.xml' });
+    await runImport(catalog, job.id, { open: async () => input(doc(item('one'))) });
+    store.savePac(id);
+    const revisions = () => db.prepare('SELECT revision FROM project_pac_versions WHERE project_id=?').all(id).map(row => row.revision);
+    expect(revisions()).toEqual([config.revision]);
+    if (scope === 'source') catalog.deleteSource(id, job.sourceId);
+    else catalog.clearProject(id, catalog.previewClear(id).confirmation);
+    expect(revisions()).toEqual([]);
+  } finally { db.close(); catalog.close(); store.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('requests the snapshotted secret from the catalog worker and releases it when cancelling a failed job', async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'pulse-catalog-pac-worker-'));
+  const file = join(folder, 'main.sqlite3');
+  const guard = `import http from 'node:http'; import https from 'node:https'; import dns from 'node:dns/promises';
+    import { syncBuiltinESMExports } from 'node:module';
+    http.request = https.request = () => { throw new Error('No sockets allowed in this catalog fixture.'); };
+    dns.lookup = async () => [{ address: '8.8.4.4', family: 4 }]; syncBuiltinESMExports();`;
+  const workerScenario = `
+    (async () => {
+    const { setTimeout } = await import('node:timers/promises');
+    const { Store } = await import('./src/server/store.ts');
+    const { CatalogService } = await import('./src/server/catalog/service.ts');
+    const { parsePacFile, withPacProxies } = await import('./src/server/pac-config.ts');
+    const store = new Store(process.argv[1]);
+    const read = [];
+    const removed = [];
+    const errors = [];
+    const service = new CatalogService(process.argv[1], error => errors.push(String(error)), { store, secrets: {
+      mode: 'desktop',
+      async save() { throw new Error('No new secret required'); },
+      async read(ref) { read.push(ref); return undefined; },
+      async remove(ref) { removed.push(ref); },
+    } });
+    try {
+      const { id } = store.createProject('PAC worker', '');
+      const pac = parsePacFile('office.pac', "function FindProxyForURL() { return 'HTTPS proxy.example:8443'; }");
+      store.savePac(id, withPacProxies(pac, [{ url: 'https://proxy.example:8443', allowPrivate: false, connectByHostname: true,
+        auth: { username: 'fixture', ref: 'desktop-00000000-0000-4000-8000-000000000123' } }]));
+      const job = service.db.create(id, { url: 'https://target.example/sitemap.xml' });
+      store.savePac(id);
+      service.start();
+      let current = service.db.job(id, job.id);
+      for (let attempt = 0; attempt < 160 && current.state !== 'failed'; attempt++) {
+        await setTimeout(25);
+        current = service.db.job(id, job.id);
+      }
+      const pendingRemoval = removed.slice();
+      await service.control(id, job.id, 'cancel');
+      await service.close();
+      console.log(JSON.stringify({ state: current.state, error: current.error, read, pendingRemoval, removed, errors }));
+    } finally { await service.close(); store.close(); }
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `;
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--import',
+      'data:text/javascript,' + encodeURIComponent(guard), '-e', workerScenario, file], { timeout: 8_000 });
+    const ref = 'desktop-00000000-0000-4000-8000-000000000123';
+    expect(JSON.parse(stdout)).toEqual({ state: 'failed', error: 'Секрет доверенного прокси недоступен или не настроен.',
+      read: [ref], pendingRemoval: [], removed: [ref], errors: [] });
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+}, 10_000);
 
 test('rejects a stale catalog clear preview when the same source gets a new version or transfer', async () => {
   const folder = mkdtempSync(join(tmpdir(), 'pulse-catalog-clear-scope-'));

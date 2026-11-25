@@ -3,19 +3,19 @@ import { Cable, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import { translateDiagnostic } from '../shared/i18n/diagnostics.js';
 import { requestProfilesMessages } from '../shared/i18n/locales/request-profiles.js';
 import type {
-  RequestAuthInput, RequestHeaderView, RequestProfileInput, RequestProfilesView, RequestProfileView, RequestSecretInput, RequestSecretView,
+  RequestAuthInput, RequestHeaderView, RequestProfileInput, RequestProfilesView, RequestProfileView,
 } from '../shared/request-profiles.js';
 import type { CheckResult } from '../shared/types.js';
 import { api, requestOrigin, requestProfilesPath, useQuery, useTask, write } from './api.js';
 import { ConfirmDeletion } from './forms.js';
 import { createMessages, currentLocale } from './i18n.js';
 import { ProjectPacSettings } from './pac-settings.js';
+import { readSecret, SecretField, type SecretMode } from './request-secret-field.js';
 import { ErrorMessage, formatNumber, Loading, Modal, Status } from './ui.js';
 
 const useText = createMessages('request-profiles', requestProfilesMessages);
 
 type ProfileDialog = { type: 'create' } | { type: 'edit' | 'test' | 'delete'; profile: RequestProfileView };
-type SecretMode = RequestProfilesView['secretMode'];
 type HeaderRow = { id: number; name: string; secret: boolean; saved?: RequestHeaderView };
 
 const authOptions = { none: 'authNone', basic: 'authBasic', bearer: 'authBearer', 'api-key': 'apiKey' } as const;
@@ -36,28 +36,6 @@ export function RequestDetails({ result }: {
     {result.failureStage && <div><dt>{t('failureStage')}</dt><dd>{t(failureLabels[result.failureStage])}</dd></div>}
     {result.proxyHttpCode != null && <div><dt>{t('proxyHttp')}</dt><dd>{result.proxyHttpCode}</dd></div>}
   </>;
-}
-
-function readSecret(form: FormData, name: string, mode: SecretMode): RequestSecretInput | undefined {
-  const value = String(form.get(name) ?? '');
-  if (!value) return undefined;
-  return mode === 'desktop' ? { value } : { environment: value.trim() };
-}
-
-function SecretField({ name, label, environmentLabel, mode, saved }: {
-  name: string; label: string; environmentLabel: string; mode: SecretMode; saved?: RequestSecretView;
-}) {
-  const t = useText();
-  const configured = saved?.configured ?? false;
-  return <div className="request-secret-field">
-    <label>{mode === 'desktop' ? label : environmentLabel}
-      <input name={name} required={!configured} type={mode === 'desktop' ? 'password' : 'text'}
-        autoComplete={mode === 'desktop' ? 'new-password' : 'off'} spellCheck={false}
-        placeholder={mode === 'environment' && !configured ? 'PULSE_REQUEST_SECRET_…' : undefined} />
-    </label>
-    {configured && <p className="field-note"><strong>{t('secretConfigured')}</strong>{saved?.environment && <> · {saved.environment}</>}<br />
-      {t('retainSecret')}</p>}
-  </div>;
 }
 
 function ProfileEditor({ path, profile, mode, close, saved }: {
@@ -267,7 +245,7 @@ export function RequestProfileSettings({ projectId }: { projectId: number }) {
         </div>
       </li>)}
     </ul> : <p className="field-note">{t('noProfiles')}</p>)}
-    <ProjectPacSettings projectId={projectId} />
+    <ProjectPacSettings projectId={projectId} secretMode={data?.secretMode} />
     {data && (dialog?.type === 'create' || dialog?.type === 'edit') && <ProfileEditor path={path}
       profile={dialog.type === 'edit' ? dialog.profile : undefined} mode={data.secretMode} close={close} saved={saved} />}
     {dialog?.type === 'test' && <ProfileTest path={path} profile={dialog.profile} close={close} />}

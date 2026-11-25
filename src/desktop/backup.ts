@@ -7,7 +7,7 @@ import { defaultLocale, type AppLocale } from '../shared/i18n/index.js';
 import { nativeTranslator } from '../shared/i18n/locales/native.js';
 import { catalogTables } from '../server/catalog/schema.js';
 import { ownerSuffix } from '../server/database-owner.js';
-import { parsePacFile } from '../server/pac-config.js';
+import { unreferencedPacVersion, validatePacVersion, type PacVersionRow } from '../server/pac-config.js';
 import { MAX_PROFILES, validateStoredRequestProfile, type ProfileConfig, type SavedRequestProfile } from '../server/request-profiles.js';
 import { pacTables, projectViewTriggers, requestProfileTables, schema } from '../server/schema.js';
 import { Store } from '../server/store.js';
@@ -195,9 +195,7 @@ export async function prepareDatabase(source: string, file: string, progress: (p
         DELETE FROM runs WHERE status IN ('queued','running') AND id NOT IN (SELECT run_id FROM results);
         UPDATE runs SET status = 'cancelled', finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
           WHERE status IN ('queued','running');
-        DELETE FROM project_pac_versions AS pac WHERE active=0 AND NOT EXISTS (
-          SELECT 1 FROM runs r WHERE r.project_id=pac.project_id AND r.pac_revision=pac.revision
-        );
+        DELETE FROM project_pac_versions AS pac WHERE ${unreferencedPacVersion};
         COMMIT;
         PRAGMA wal_checkpoint(TRUNCATE);
     `);
@@ -206,12 +204,16 @@ export async function prepareDatabase(source: string, file: string, progress: (p
 
 function validatePacVersions(db: DatabaseSync) {
   try {
-    for (const row of db.prepare('SELECT filename,source,revision FROM project_pac_versions').iterate()) {
-      if (parsePacFile(row.filename, row.source).revision !== row.revision) throw new Error();
+    for (const row of db.prepare('SELECT filename,source,revision,proxy_rules FROM project_pac_versions').iterate()) {
+      validatePacVersion(row as PacVersionRow);
     }
     if (db.prepare(`SELECT 1 FROM runs r WHERE r.pac_revision IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM project_pac_versions p WHERE p.project_id=r.project_id AND p.revision=r.pac_revision
     ) LIMIT 1`).get()) throw new Error();
+    if (db.prepare(`SELECT 1 FROM catalog_imports i JOIN catalog_sources s ON s.id=i.source_id
+      WHERE i.pac_revision IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM project_pac_versions p WHERE p.project_id=s.project_id AND p.revision=i.pac_revision
+      ) LIMIT 1`).get()) throw new Error();
   } catch {
     throw new Error('В резервной копии повреждены версии PAC-файлов.');
   }

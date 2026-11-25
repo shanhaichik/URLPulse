@@ -10,10 +10,10 @@ import type { RequestProfileChoice } from '../shared/request-profiles.js';
 import { registerCatalog } from './catalog/routes.js';
 import type { CatalogService } from './catalog/service.js';
 import { databaseBusy, type DatabaseTasks } from './database-tasks.js';
-import { checkUrl, downloadPublicFile, normalizeUrl } from './checker.js';
+import { checkUrl, downloadPublicFile, normalizeUrl, parseProxyUrl } from './checker.js';
 import { isScopeConfirmation } from './confirmation.js';
 import { downloadDisposition, exportFormat, openReportStream, reportFile } from './export.js';
-import { pacSettings, parsePacFile } from './pac-config.js';
+import { pacReferences, pacRequestOptions, pacSettings, parsePacFile, parsePacProxies, type StoredPac, withPacProxies } from './pac-config.js';
 import { createPacRouteResolver, PacError, validatePac } from './pac.js';
 import { MAX_SITEMAP_BYTES, readSitemap } from './sitemap.js';
 import { parseReportFilters } from './report-query.js';
@@ -137,6 +137,16 @@ export function createApp(options: AppOptions = {}) {
   const store = options.store ?? new Store(options.database ?? ':memory:');
   const secrets = options.requestSecrets ?? envRequestSecrets();
   const app = Fastify({ logger: options.logger ? { level: 'warn' } : false, bodyLimit: 2_100_000 });
+
+  async function withProjectPac<T>(config: StoredPac | undefined, execute: (requestOptions: ReturnType<typeof pacRequestOptions>) => Promise<T>) {
+    const refs = pacReferences(config);
+    const release = store.retainRequestSecrets(refs);
+    try { return await execute(pacRequestOptions(config, ref => secrets.read(ref))); }
+    finally {
+      release();
+      await releaseRequestSecrets(store, secrets, refs);
+    }
+  }
 
   async function saveProfile(projectId: number, body: unknown, profileId?: number) {
     const previous = profileId === undefined ? undefined : store.requestProfile(projectId, profileId);
@@ -284,17 +294,38 @@ export function createApp(options: AppOptions = {}) {
       id(request.params.projectId), settings(request.body),
     ));
     projects.get<{ Params: ProjectParams }>('/proxy-pac', async ({ params }) =>
-      pacSettings(store.projectPac(id(params.projectId))));
+      pacSettings(store.projectPac(id(params.projectId)), secrets.mode));
     projects.put<{ Params: ProjectParams }>('/proxy-pac', async ({ params, body }) => {
       const input = object(body);
       let config;
       try { config = parsePacFile(input.filename, input.source); }
       catch (error) { throw new ApiError(400, (error as Error).message); }
       await pacOperation(signal => validatePac(config.source, signal));
-      return pacSettings(store.savePac(id(params.projectId), config));
+      const projectId = id(params.projectId);
+      const updated = withPacProxies(config, store.projectPac(projectId)?.proxies);
+      return pacSettings(store.savePac(projectId, updated), secrets.mode);
     });
-    projects.delete<{ Params: ProjectParams }>('/proxy-pac', async ({ params }) =>
-      pacSettings(store.savePac(id(params.projectId))));
+    projects.patch<{ Params: ProjectParams }>('/proxy-pac', async ({ params, body }) => {
+      const projectId = id(params.projectId);
+      const previous = store.projectPac(projectId);
+      if (!previous) throw new ApiError(404, 'Загрузите PAC-файл для проекта.');
+      const input = object(body);
+      if (input.revision !== previous.revision) throw new ApiError(409, 'Настройки PAC изменились. Обновите данные и повторите действие.');
+      const staged: string[] = [];
+      try {
+        const config = await parsePacProxies(input.proxies, previous, secrets, staged);
+        return pacSettings(store.savePac(projectId, config, previous.revision), secrets.mode);
+      } finally {
+        await releaseRequestSecrets(store, secrets, [...staged, ...pacReferences(previous)]);
+      }
+    });
+    projects.delete<{ Params: ProjectParams }>('/proxy-pac', async ({ params }) => {
+      const projectId = id(params.projectId);
+      const refs = pacReferences(store.projectPac(projectId));
+      store.savePac(projectId);
+      await releaseRequestSecrets(store, secrets, refs);
+      return pacSettings();
+    });
     projects.post<{ Params: ProjectParams }>('/proxy-pac/test', async ({ params, body }): Promise<PacPreview> => {
       const projectId = id(params.projectId);
       const config = store.projectPac(projectId);
@@ -312,8 +343,12 @@ export function createApp(options: AppOptions = {}) {
         if (url.protocol === 'http:') {
           throw new ApiError(400, 'PAC выбрал прокси. В Пульсе URL этот маршрут доступен для HTTPS-адресов.');
         }
-        try { normalizeUrl(first.url); }
-        catch { throw new ApiError(400, 'Первый маршрут PAC должен указывать на публичный прокси.'); }
+        const rule = config.proxies?.find(proxy => proxy.url === first.url);
+        try { parseProxyUrl({ url: first.url }, rule); }
+        catch {
+          throw new ApiError(400, rule ? 'Адрес доверенного прокси недоступен или запрещён.'
+            : 'Первый маршрут PAC должен указывать на публичный прокси.');
+        }
       }
       return { routes, source: 'pac' };
     });
@@ -338,8 +373,8 @@ export function createApp(options: AppOptions = {}) {
       const requestOptions = await resolveRequestOptions(profile, secrets).catch(() => undefined);
       if (!requestOptions) return configurationFailure(url, profile);
       const projectPac = requestOptions.proxy ? undefined : store.projectPac(projectId);
-      const pac = projectPac ? createPacRouteResolver(projectPac.source) : undefined;
-      return (options.checkRequest ?? checkUrl)(url, { tlsProfile: store.project(projectId).tlsProfile, requestOptions, pac });
+      return withProjectPac(projectPac, pacOptions => (options.checkRequest ?? checkUrl)(url,
+        { tlsProfile: store.project(projectId).tlsProfile, requestOptions, ...pacOptions }));
     });
     projects.get<{ Params: ProjectParams }>('/groups', async ({ params }) => {
       const project = id(params.projectId);
@@ -428,7 +463,8 @@ export function createApp(options: AppOptions = {}) {
       const { tlsProfile } = store.project(projectId);
       try {
         found = options.sitemap ? await options.sitemap(source, tlsProfile)
-          : await readSitemap(source, (url, size, timeout) => downloadPublicFile(url, size, timeout, tlsProfile));
+          : await withProjectPac(store.projectPac(projectId), network =>
+            readSitemap(source, (url, size, timeout) => downloadPublicFile(url, size, timeout, tlsProfile, network)));
       }
       catch (error) { throw new ApiError(422, (error as Error).message.slice(0, 250)); }
       const imported = store.addUrls(projectId,
@@ -538,7 +574,8 @@ export function createApp(options: AppOptions = {}) {
       const result = await (options.tasks?.run('stopRun', project, run) ?? store.stopRun(project, run));
       if (result.status === 'cancelled') {
         options.onRunStopped?.(run);
-        if (secrets.mode === 'desktop') await releaseRequestSecrets(store, secrets, store.requestSnapshot(run).flatMap(profileReferences));
+        if (secrets.mode === 'desktop') await releaseRequestSecrets(store, secrets,
+          [...store.requestSnapshot(run).flatMap(profileReferences), ...pacReferences(store.pacSnapshot(run))]);
       }
       return result;
     });

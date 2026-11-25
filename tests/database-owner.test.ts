@@ -10,7 +10,7 @@ import { Store } from '../src/server/store.js';
 test('refuses another process before recovery and releases the lock after a crash', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pulse-owner-test-'));
   const file = join(directory, 'pulse.sqlite3');
-  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+  const child = spawn(process.execPath, ['--expose-gc', '--import', 'tsx', '--input-type=module', '-e', `
     import { ownDatabase } from './src/server/database-owner.ts';
     import { Store } from './src/server/store.ts';
     const ownership = ownDatabase(process.argv[1]);
@@ -19,8 +19,12 @@ test('refuses another process before recovery and releases the lock after a cras
     store.addUrls(project.id, [{ line: 1, input: 'example.com' }]);
     const run = store.enqueue(project.id);
     store.claim();
-    process.stdout.write(JSON.stringify({ projectId: project.id, runId: run.id }) + '\\n');
+    process.stdin.once('end', () => { store.close(); ownership.release(); });
     process.stdin.resume();
+    setImmediate(() => {
+      globalThis.gc();
+      setImmediate(() => process.stdout.write(JSON.stringify({ projectId: project.id, runId: run.id }) + '\\n'));
+    });
   `, file], { stdio: ['pipe', 'pipe', 'inherit'] });
   const closed = once(child, 'exit');
   try {

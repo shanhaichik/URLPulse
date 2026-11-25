@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS project_pac_versions (
   revision TEXT NOT NULL,
   filename TEXT NOT NULL,
   source TEXT NOT NULL,
+  proxy_rules TEXT NOT NULL DEFAULT '[]',
   active INTEGER NOT NULL CHECK (active IN (0,1)),
   PRIMARY KEY (project_id,revision)
 );

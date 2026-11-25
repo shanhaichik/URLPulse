@@ -71,6 +71,48 @@ test('installs, previews, replaces and disables the project PAC file', async ({ 
   await expect(pac.getByRole('button', { name: 'Проверить маршрут' })).toHaveCount(0);
 });
 
+test('configures, localizes and removes a trusted proxy for a project', async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const project = await request.post('/api/projects', { data: { name: 'Офисная сеть' } });
+  const { id } = await project.json();
+  const path = `/api/projects/${id}/proxy-pac`;
+  const uploaded = await request.put(path, { data: {
+    filename: 'office.pac', source: "function FindProxyForURL() { return 'HTTPS proxy.office.test:8443'; }",
+  } });
+  expect(uploaded.ok()).toBe(true);
+  await page.goto(`/?project=${id}`);
+  await page.getByRole('button', { name: 'Настройки', exact: true }).click();
+  await page.getByRole('button', { name: 'Добавить доверенный прокси' }).click({ timeout: 3_000 });
+  const editor = page.getByRole('dialog');
+  const origin = 'https://proxy.office.test:8443';
+  await expect(editor.getByLabel('Адрес прокси')).toBeFocused();
+  await editor.getByLabel('Адрес прокси').fill('http://proxy.office.test:8443');
+  await expect(editor.getByLabel('Авторизация Basic')).toBeDisabled();
+  await editor.getByLabel('Адрес прокси').fill(origin);
+  await editor.getByLabel('Разрешить приватный IP прокси').check();
+  await editor.getByLabel('Передавать имя цели в CONNECT').check();
+  await editor.getByLabel('Авторизация Basic').check();
+  await editor.getByLabel('Логин прокси').fill('alice');
+  await editor.getByLabel('Переменная окружения для пароля').fill('PULSE_REQUEST_SECRET_OFFICE');
+  await editor.getByRole('combobox', { name: 'Язык', exact: true }).selectOption('en-US');
+  await expect(editor.getByLabel('Proxy address')).toHaveValue(origin);
+  await expect(editor.getByLabel('Allow a private proxy IP')).toBeChecked();
+  await expect(editor.getByLabel('Password environment variable')).toHaveValue('PULSE_REQUEST_SECRET_OFFICE');
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const saved = (await (await request.get(path)).json()).pac.proxies;
+  expect(saved).toEqual([{ url: origin, allowPrivate: true, connectByHostname: true,
+    auth: { username: 'alice', configured: true, environment: 'PULSE_REQUEST_SECRET_OFFICE' } }]);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const proxy = page.getByRole('listitem').filter({ hasText: origin });
+  await expect(proxy.getByText('Basic configured')).toBeVisible();
+  await proxy.getByRole('button', { name: 'Remove', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Remove trusted proxy?' }).getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(proxy).toHaveCount(0);
+  expect((await (await request.get(path)).json()).pac.proxies).toBeUndefined();
+});
+
 test('shows the saved endpoint and routing source, including PAC evaluation failures', async ({ page }) => {
   const store = new Store(':memory:');
   const app = createApp({ store });

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS catalog_imports (
   source_id INTEGER NOT NULL REFERENCES catalog_sources(id) ON DELETE CASCADE,
   state TEXT NOT NULL,
   profile TEXT NOT NULL,
+  pac_revision TEXT,
   file_name TEXT,
   file_key TEXT UNIQUE,
   error TEXT,

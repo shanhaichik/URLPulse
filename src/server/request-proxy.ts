@@ -20,13 +20,14 @@ export class ProxyRequestError extends Error {
 }
 
 export function openProxyTunnel(proxy: URL, addresses: Endpoint[], authorization: string | undefined,
-  target: URL, targetAddress: Endpoint, signal: AbortSignal): Promise<Duplex> {
+  target: URL, targetAddress: Endpoint, signal: AbortSignal, connectByHostname = false): Promise<Duplex> {
   const address = targetAddress.family === 6 ? '[' + targetAddress.address + ']' : targetAddress.address;
-  const authority = address + ':' + (target.port || '443');
+  const authority = (connectByHostname ? target.hostname : address) + ':' + (target.port || '443');
+  const hostname = proxy.hostname.replace(/^\[|\]$/g, '');
   const send = proxy.protocol === 'https:' ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     const request = send({
-      hostname: proxy.hostname.replace(/^\[|\]$/g, ''),
+      hostname,
       port: proxy.port || undefined,
       path: authority,
       method: 'CONNECT',
@@ -34,7 +35,12 @@ export function openProxyTunnel(proxy: URL, addresses: Endpoint[], authorization
       signal,
       lookup: pinnedLookup(addresses),
       headers: { host: authority, ...(authorization ? { 'proxy-authorization': authorization } : {}) },
-      ...(proxy.protocol === 'https:' ? { rejectUnauthorized: true } : {}),
+      ...(proxy.protocol === 'https:' ? {
+        rejectUnauthorized: true,
+        servername: isIP(hostname) ? '' : hostname,
+        checkServerIdentity: (_servername: string, certificate: Parameters<typeof checkServerIdentity>[1]) =>
+          checkServerIdentity(hostname, certificate),
+      } : {}),
     });
     request.on('error', error => reject(signal.aborted ? signal.reason
       : new ProxyRequestError('Не удалось подключиться к прокси.', null, error)));

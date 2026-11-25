@@ -5,6 +5,7 @@ import { CATALOG_DOCUMENT_LIMIT, CATALOG_URL_LIMIT, type CatalogClearPreview, ty
 import type { TlsProfile } from '../../shared/types.js';
 import { normalizeUrl } from '../checker.js';
 import { scopeConfirmation } from '../confirmation.js';
+import { pacReferences, storedPac, unreferencedPacVersion, type PacVersionRow } from '../pac-config.js';
 import { CatalogTransfers } from './transfer.js';
 import { ApiError } from '../store.js';
 
@@ -94,6 +95,7 @@ export class Catalog {
       }
       const files = this.all<{ key: string }>('SELECT file_key AS key FROM catalog_imports WHERE source_id=? AND file_key IS NOT NULL', id);
       this.run('DELETE FROM catalog_sources WHERE id=?', id);
+      this.discardUnusedPac(projectId);
       return files;
     });
   }
@@ -129,13 +131,20 @@ export class Catalog {
         JOIN catalog_imports i ON i.source_id=s.id WHERE s.project_id=? AND i.file_key IS NOT NULL`, projectId);
       this.run('DELETE FROM catalog_transfers WHERE project_id=?', projectId);
       this.run('DELETE FROM catalog_sources WHERE project_id=?', projectId);
+      this.discardUnusedPac(projectId);
       return { files, deleted: scope.sources };
     });
   }
 
+  private discardUnusedPac(projectId: number) {
+    this.run(`DELETE FROM project_pac_versions AS pac WHERE project_id=? AND ${unreferencedPacVersion}`, projectId);
+  }
+
   create(projectId: number, input: CatalogInput) {
     return this.atomic(() => {
-      const project = this.get<{ tls_profile: TlsProfile }>('SELECT tls_profile FROM projects WHERE id=?', projectId);
+      const project = this.get<{ tls_profile: TlsProfile; pac_revision: string | null }>(`SELECT tls_profile,
+        (SELECT revision FROM project_pac_versions WHERE project_id=projects.id AND active=1) AS pac_revision
+        FROM projects WHERE id=?`, projectId);
       if (!project) throw new ApiError(404, 'Проект не найден.');
       let requestedUrl: string | null = null;
       if ('url' in input) {
@@ -153,8 +162,9 @@ export class Catalog {
       if (this.activeImport(sourceId)) {
         throw new ApiError(409, 'Для этого источника уже есть активный импорт.');
       }
-      const result = this.run('INSERT INTO catalog_imports(source_id,state,profile,file_name,file_key,created_at) VALUES (?,?,?,?,?,?)',
-        sourceId, fileName ? 'upload' : 'queued', project.tls_profile, fileName, fileName ? randomUUID() : null, new Date().toISOString());
+      const result = this.run(`INSERT INTO catalog_imports(source_id,state,profile,pac_revision,file_name,file_key,created_at)
+        VALUES (?,?,?,?,?,?,?)`, sourceId, fileName ? 'upload' : 'queued', project.tls_profile, project.pac_revision,
+      fileName, fileName ? randomUUID() : null, new Date().toISOString());
       const id = Number(result.lastInsertRowid);
       this.run('INSERT INTO catalog_documents(import_id,location) VALUES (?,?)', id, fileName ? localDocument : requestedUrl ?? source!.url!);
       return this.job(projectId, id);
@@ -259,6 +269,23 @@ export class Catalog {
     this.run("UPDATE catalog_imports SET state='failed', error='Обработчик импорта завершился. Попробуйте продолжить.' WHERE id=? AND state IN ('queued','running')", id);
   }
   profile(id: number) { return this.get<{ profile: TlsProfile }>('SELECT profile FROM catalog_imports WHERE id=?', id)!.profile; }
+  pacSnapshot(id: number) {
+    const row = this.get<PacVersionRow>(`SELECT p.filename,i.pac_revision AS revision,p.source,p.proxy_rules
+      FROM catalog_imports i JOIN catalog_sources s ON s.id=i.source_id
+      LEFT JOIN project_pac_versions p ON p.project_id=s.project_id AND p.revision=i.pac_revision
+      WHERE i.id=? AND i.pac_revision IS NOT NULL`, id);
+    if (row?.source === null) throw new Error('Версия PAC для импорта каталога отсутствует в базе.');
+    return row ? storedPac(row) : undefined;
+  }
+
+  pacSecretReferences(projectId: number, sourceId?: number): string[] {
+    const rows = this.all<PacVersionRow>(`SELECT DISTINCT p.filename,p.revision,p.source,p.proxy_rules
+      FROM project_pac_versions p JOIN catalog_sources s ON s.project_id=p.project_id
+      JOIN catalog_imports i ON i.source_id=s.id AND i.pac_revision=p.revision WHERE p.project_id=?
+      AND p.proxy_rules<>'[]'${sourceId === undefined ? '' : ' AND s.id=?'}`,
+    ...(sourceId === undefined ? [projectId] : [projectId, sourceId]));
+    return rows.flatMap(row => pacReferences(storedPac(row)));
+  }
   start(id: number) { return this.run("UPDATE catalog_imports SET state='running' WHERE id=? AND state='queued'", id).changes !== 0; }
   document(id: number) { return this.get<CatalogDocument>('SELECT id,location FROM catalog_documents WHERE import_id=? AND done=0 ORDER BY id LIMIT 1', id); }
   isLocal(doc: CatalogDocument) { return doc.location === localDocument; }
