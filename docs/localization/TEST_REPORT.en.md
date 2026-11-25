@@ -39,4 +39,8 @@ These are local test installers without publisher signatures. The [source releas
 
 Relative links, heading anchors, image paths, and the bilingual GitHub form YAML were checked. A local GFM-compatible Chrome preview verified the English and Russian README files at 375 and 1280 pixels in both color schemes, including navigation between the two versions. The demo kept a selected URL during the language switch and opened a comparison with synthetic data. [Demo](../media/language-switch.gif)
 
+## First run on PR #5
+
+Linux and both native macOS jobs passed, including Intel's packaged PAC workflow. Windows passed the build and both application smoke tests, including the guard against installation and removal while the app is running. The final removal check failed. The smoke script launches a temporary copy of the uninstaller with `_?=` to capture its exit code and reports paths that remain. [First Windows run](https://github.com/shanhaichik/URLPulse/actions/runs/45644045281/job/139310082128) · [NSIS documentation](https://nsis.sourceforge.io/Docs/AppendixD.html)
+
 The sample Excel headers and statuses followed the requested language. Its CSV and JSON exports matched byte for byte across locales. The [release checklist](../development/release-checklist.md) records the GitHub verification steps for the next tag.

@@ -49,11 +49,25 @@ try {
     throw 'In-place reinstallation changed the application bytes'
   }
 } finally {
-  if (Test-Path $uninstall) {
-    $removed = Start-Process $uninstall -ArgumentList '/S' -Wait -PassThru
-    if ($removed.ExitCode -ne 0) { throw "Uninstall returned $($removed.ExitCode)" }
+  if (Test-Path -LiteralPath $uninstall) {
+    # Run outside the install directory and read the uninstaller's exit code directly.
+    $tempPath = [IO.Path]::GetTempPath()
+    $uninstallCopy = Join-Path $tempPath "pulse-uninstall-$([Guid]::NewGuid()).exe"
+    try {
+      Copy-Item -LiteralPath $uninstall -Destination $uninstallCopy
+      $removed = Start-Process $uninstallCopy -ArgumentList "/S _?=$installPath" -WorkingDirectory $tempPath -Wait -PassThru
+      if ($removed.ExitCode -ne 0) { throw "Uninstall returned $($removed.ExitCode)" }
+    } finally {
+      Remove-Item -LiteralPath $uninstallCopy -Force -ErrorAction SilentlyContinue
+    }
   }
-  if ((Test-Path $installPath) -or (Test-Path $registration) -or (Test-Path $shortcut)) {
-    throw 'Uninstall left the installation directory or Windows entries behind'
+  $remaining = @($installPath, $registration, $shortcut) | Where-Object { Test-Path -LiteralPath $_ }
+  if ($remaining) {
+    if (Test-Path -LiteralPath $installPath) {
+      Get-ChildItem -LiteralPath $installPath -Force -Name | ForEach-Object { Write-Host "Remaining in install directory: $_" }
+    }
+    throw "Uninstall left these paths: $($remaining -join ', ')"
   }
 }
+
+Write-Host 'Windows package smoke passed (install, reinstall, language preference, and removal).'
