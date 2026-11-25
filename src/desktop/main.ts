@@ -11,6 +11,9 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, safeStorage, session, shell, Tray } from 'electron';
 import { DESKTOP_SHUTDOWN, type BackupPhase, type DesktopRequest, type DesktopSaveResult, type ExportFormat, type SaveDesktopPreferences } from '../shared/desktop.js';
+import { defaultLocale, isLocale, type AppLocale } from '../shared/i18n/index.js';
+import { translateDiagnostic } from '../shared/i18n/diagnostics.js';
+import { nativeTranslator } from '../shared/i18n/locales/native.js';
 import { normalizeUrl } from '../server/checker.js';
 import { createApp } from '../server/app.js';
 import { exportFormat, openReportStream, reportFile } from '../server/export.js';
@@ -21,7 +24,7 @@ import { russianCaFilename } from '../server/tls-profile.js';
 import { startBackground } from '../server/worker.js';
 import { assertSeparateFile, atomicFile, copyDatabase, createBackup, openStagingJournal, prepareImport } from './backup.js';
 import { desktopRequest, exportScope, reportArguments } from './contracts.js';
-import { desktopPreferences } from './preferences.js';
+import { desktopPreferences, readDesktopLocale } from './preferences.js';
 import { desktopRequestSecrets } from './request-secrets.js';
 
 const uiOrigin = 'pulse-app://app';
@@ -36,6 +39,8 @@ if (explicitDirectory) {
   app.setPath('userData', data);
 }
 app.setName('Pulse URL');
+let activeLocale: AppLocale = defaultLocale;
+const text = () => nativeTranslator(activeLocale);
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'pulse-app', privileges: { standard: true, secure: true, supportFetchAPI: true } },
@@ -46,7 +51,10 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   void start().catch(error => {
     console.error(error);
-    dialog.showErrorBox('Пульс URL', 'Не удалось запустить приложение. ' + (error as Error).message);
+    const t = text();
+    dialog.showErrorBox(t('title'), t('startFailed', {
+      detail: translateDiagnostic((error as Error).message, activeLocale),
+    }));
     app.exit(1);
   });
 }
@@ -93,7 +101,7 @@ async function start() {
     if (!booted || quitting) return;
     if (!window || window.isDestroyed()) {
       window = new BrowserWindow({
-        title: 'Пульс URL', width: 1280, height: 880, minWidth: 400, minHeight: 550, show: false,
+        title: text()('title'), width: 1280, height: 880, minWidth: 400, minHeight: 550, show: false,
         icon: appIcon,
         webPreferences: { preload, nodeIntegration: false, sandbox: true, contextIsolation: true },
       });
@@ -139,13 +147,15 @@ async function start() {
   app.dock?.setIcon(appIcon);
   const directory = app.getPath('userData');
   prepareProfileDirectory(directory, !explicitDirectory);
+  activeLocale = await readDesktopLocale(directory);
   process.env.PULSE_RUSSIAN_CA_FILE ||= join(directory, 'cert', russianCaFilename);
   const { path: database, release: releaseDatabase } = ownDatabase(join(directory, 'pulse.sqlite3'));
   app.once('will-quit', releaseDatabase);
   const staging = await openStagingJournal(dirname(database));
   await staging.recover();
   const preferences = await desktopPreferences(directory);
-  const requestSecrets = desktopRequestSecrets(directory, safeStorage);
+  activeLocale = preferences.getLocale();
+  const requestSecrets = desktopRequestSecrets(directory, safeStorage, () => activeLocale);
   const store = new Store(database);
   const catalog = new CatalogService(database);
   const tasks = new DatabaseTasks(database);
@@ -178,59 +188,68 @@ async function start() {
   }
 
   function handle<T extends unknown[]>(name: string, listener: (...parameters: T) => Promise<unknown> | unknown,
-    shutdownResponse?: typeof DESKTOP_SHUTDOWN) {
-    ipcMain.handle(name, (event, ...parameters: T) => {
+    respondWhileQuitting = false) {
+    ipcMain.handle(name, async (event, ...parameters: T) => {
+      const locale = activeLocale;
+      const t = nativeTranslator(locale);
       const frame = event.senderFrame;
       if (event.sender !== window?.webContents || !frame || frame.parent
         || !frame.url.startsWith(uiOrigin + '/')) {
-        throw new Error('Операция доступна из главного окна приложения.');
+        throw new Error(t('mainWindowRequired'));
       }
       if (quitting) {
-        if (shutdownResponse) return shutdownResponse;
-        throw new Error(DESKTOP_SHUTDOWN.data.error);
+        if (respondWhileQuitting) return { ...DESKTOP_SHUTDOWN, data: { ...DESKTOP_SHUTDOWN.data, error: t('shuttingDown') } };
+        throw new Error(t('shuttingDown'));
       }
-      return listener(...parameters);
+      try { return await listener(...parameters); }
+      catch (error) {
+        if (error instanceof ApiError) throw new Error(translateDiagnostic(error.message, locale), { cause: error });
+        throw error;
+      }
     });
   }
 
   function withFileDialog<T>(operation: () => Promise<T>) {
-    if (quitting || fileTask) throw new Error('Дождитесь завершения текущей операции с файлом.');
+    if (quitting || fileTask) throw new Error(text()('fileBusy'));
     const task = operation().finally(() => { fileTask = undefined; });
     fileTask = task;
     return task;
   }
 
   async function saveExport(result: { canceled: boolean; filePath?: string },
-    write: (path: string) => Promise<unknown>, kind: 'write' | 'backup' = 'write'): Promise<DesktopSaveResult> {
+    write: (path: string) => Promise<unknown>, locale: AppLocale, kind: 'write' | 'backup' = 'write'): Promise<DesktopSaveResult> {
     if (result.canceled || !result.filePath) return { saved: false };
+    const t = nativeTranslator(locale);
     try {
       await assertSeparateFile(database, result.filePath);
       await atomicFile(result.filePath, write, staging, kind);
       return { saved: true };
     } catch (error) {
-      if (error instanceof ApiError) return { saved: false, error: error.message };
+      if (error instanceof ApiError) return { saved: false, error: translateDiagnostic(error.message, locale) };
       const code = (error as NodeJS.ErrnoException).code;
-      console.error('Не удалось записать файл выгрузки', code ?? 'UNKNOWN');
+      console.error(t('saveLog'), code ?? 'UNKNOWN');
       if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
-        return { saved: false, error: 'Нет прав на запись. Выберите другое место для сохранения.' };
+        return { saved: false, error: t('writeDenied') };
       }
       if (code === 'ENOSPC' || code === 'EDQUOT') {
-        return { saved: false, error: 'Не хватает места. Выберите другой диск или освободите место.' };
+        return { saved: false, error: t('diskFull') };
       }
-      return { saved: false, error: 'Не удалось сохранить файл по выбранному пути. Выберите другой файл или папку.' };
+      return { saved: false, error: t('writeFailed') };
     }
   }
 
-  async function saveReportFile(projectName: string, format: ExportFormat, title: string, open: () => Promise<Readable>) {
-    const file = reportFile(projectName, format);
+  async function saveReportFile(projectName: string, format: ExportFormat, kind: 'exportReport' | 'exportComparison',
+    locale: AppLocale, exportLocale: AppLocale | undefined, open: () => Promise<Readable>) {
+    const file = reportFile(projectName, format, undefined, exportLocale);
+    const t = nativeTranslator(locale);
     const result = await dialog.showSaveDialog(window!, {
-      title, defaultPath: file.name,
-      filters: [{ name: format === 'excel' ? 'CSV для Excel' : format.toUpperCase(), extensions: [file.extension] }],
+      title: t(kind), defaultPath: file.name,
+      filters: [{ name: format === 'excel' ? t('excelCsv') : format.toUpperCase(), extensions: [file.extension] }],
     });
     return saveExport(result, async staged => {
       const stream = await open();
       await pipeline(stream, createWriteStream(staged));
-    });
+    }, locale);
   }
 
   function showFailure(message: string, error: unknown) {
@@ -242,33 +261,36 @@ async function start() {
 
   function saveDatabase() {
     return withFileDialog(async () => {
+      const locale = activeLocale;
+      const t = nativeTranslator(locale);
       const result = await dialog.showSaveDialog(window!, {
-        title: 'Экспорт резервной копии', defaultPath: 'pulse-backup.sqlite3',
-        filters: [{ name: 'База SQLite', extensions: ['sqlite3', 'sqlite', 'db'] }],
+        title: t('exportBackup'), defaultPath: 'pulse-backup.sqlite3',
+        filters: [{ name: t('sqliteFile'), extensions: ['sqlite3', 'sqlite', 'db'] }],
       });
-      return saveExport(result, staged => copyDatabase(database, staged), 'backup');
+      return saveExport(result, staged => copyDatabase(database, staged), locale, 'backup');
     });
   }
 
   function restoreDatabase() {
     return withFileDialog(async () => {
+      const locale = activeLocale;
+      const t = nativeTranslator(locale);
       const result = await dialog.showOpenDialog(window!, {
-        title: 'Восстановление резервной копии', properties: ['openFile'],
-        filters: [{ name: 'База SQLite', extensions: ['sqlite3', 'sqlite', 'db'] }],
+        title: t('restoreBackup'), properties: ['openFile'],
+        filters: [{ name: t('sqliteFile'), extensions: ['sqlite3', 'sqlite', 'db'] }],
       });
       if (result.canceled || !result.filePaths[0]) return false;
       const source = result.filePaths[0];
-      await assertSeparateFile(database, source);
+      await assertSeparateFile(database, source, locale);
       const agreement = await dialog.showMessageBox(window!, {
-        type: 'warning', message: 'Заменить текущую базу?',
-        detail: 'Текущая база будет сохранена в резервную копию. После перезапуска расписания будут приостановлены. Незавершённые проверки из копии не продолжатся. Уже полученные результаты сохранятся.',
-        buttons: ['Отмена', 'Восстановить'], defaultId: 0, cancelId: 0,
+        type: 'warning', message: t('replaceDatabase'), detail: t('replaceDatabaseDetail'),
+        buttons: [t('cancel'), t('restore')], defaultId: 0, cancelId: 0,
       });
       if (agreement.response !== 1) return false;
       const progress = (phase: BackupPhase | null) => {
         if (window && !window.isDestroyed()) window.webContents.send('pulse:backup-progress', phase);
       };
-      const staged = await prepareImport(source, dirname(database), progress, staging).catch(error => {
+      const staged = await prepareImport(source, dirname(database), progress, staging, locale).catch(error => {
         progress(null);
         throw error;
       });
@@ -278,7 +300,7 @@ async function start() {
       quitting = true;
       let previousScheduleState: boolean | undefined;
       try {
-        await preferencesTask;
+        await preferences.waitForWrites();
         await stop();
         await createBackup(database, join(dirname(database), `pulse-before-import-${Date.now()}.sqlite3`), staging);
         previousScheduleState = preferences.schedulesEnabled();
@@ -292,7 +314,7 @@ async function start() {
         if (previousScheduleState !== undefined) {
           await preferences.setSchedulesEnabled(previousScheduleState).catch(console.error);
         }
-        await showFailure('Не удалось восстановить резервную копию', error);
+        await showFailure(t('restoreFailed'), error);
         app.relaunch();
         exit();
         throw error;
@@ -308,7 +330,7 @@ async function start() {
     open();
     void Promise.resolve().then(operation).then(result => {
       if (typeof result !== 'boolean' && !result.saved && result.error) throw new Error(result.error);
-    }).catch(error => showFailure('Операция с базой Пульса URL', error));
+    }).catch(error => showFailure(text()('databaseAction'), error));
   };
 
   handle('pulse:navigation-ready', () => {
@@ -316,94 +338,149 @@ async function start() {
     sendReport();
   });
   handle('pulse:request', (input: DesktopRequest) => {
-    const request = desktopRequest(input);
+    const request = desktopRequest(input, activeLocale);
     const pending = api.inject({
       method: request.method, url: request.path, payload: request.body,
-      headers: request.body === undefined ? {} : { 'content-type': 'application/json' },
+      headers: {
+        ...(request.body !== undefined && { 'content-type': 'application/json' }),
+        ...(request.i18n && { 'x-urlpulse-i18n': '1' }),
+      },
     }).then(response => ({ status: response.statusCode, data: response.json() }));
     pendingRequests.add(pending);
     return pending.finally(() => { pendingRequests.delete(pending); });
-  }, DESKTOP_SHUTDOWN);
+  }, true);
   handle('pulse:open-address', async (projectId: number, addressId: number) => {
     if (![projectId, addressId].every(value => Number.isSafeInteger(value) && value > 0)) {
-      throw new Error('Недопустимый адрес.');
+      throw new Error(text()('invalidAddress'));
     }
     const { url } = store.address(projectId, addressId);
     await shell.openExternal(normalizeUrl(url));
   });
-  handle('pulse:export-report', (path: string, format: ExportFormat, filters?: unknown) => withFileDialog(async () => {
+  function reportLocale(requested: unknown) {
+    if (requested !== undefined && !isLocale(requested)) throw new Error(text()('chooseLocale'));
+    return { dialogLocale: requested ?? activeLocale, exportLocale: requested };
+  }
+
+  handle('pulse:export-report', (path: string, format: ExportFormat, filters?: unknown, locale?: unknown) => withFileDialog(async () => {
+    const { dialogLocale, exportLocale } = reportLocale(locale);
     const kind = exportFormat(format);
-    const { projectId, ...scope } = exportScope(path);
+    const { projectId, ...scope } = exportScope(path, dialogLocale);
     const project = store.project(projectId);
     const requestedFilters = parseReportFilters(filters);
-    return saveReportFile(project.name, kind, 'Экспорт отчёта',
-      () => openReportStream(store, projectId, scope, requestedFilters, kind, tasks));
+    return saveReportFile(project.name, kind, 'exportReport', dialogLocale, exportLocale,
+      () => openReportStream(store, projectId, scope, requestedFilters, kind, tasks, exportLocale));
   }));
-  handle('pulse:export-comparison', (project: unknown, input: unknown, format: unknown) => withFileDialog(async () => {
+  handle('pulse:export-comparison', (project: unknown, input: unknown, format: unknown, locale?: unknown) => withFileDialog(async () => {
+    const { dialogLocale, exportLocale } = reportLocale(locale);
     const projectId = catalogId(project);
     const kind = exportFormat(format);
     const comparison = parseComparisonInput(input);
-    return saveReportFile(store.project(projectId).name, kind, 'Экспорт сравнения',
-      () => openComparisonStream(store, projectId, comparison, kind, tasks));
+    return saveReportFile(store.project(projectId).name, kind, 'exportComparison', dialogLocale, exportLocale,
+      () => openComparisonStream(store, projectId, comparison, kind, tasks, exportLocale));
   }));
   handle('pulse:pick-catalog', (project: number, source?: number) => withFileDialog(async () => {
+    const t = text();
     const projectId = catalogId(project);
     const sourceId = source === undefined ? undefined : catalogId(source);
     store.project(projectId);
     const result = await dialog.showOpenDialog(window!, {
-      title: 'Импорт sitemap', properties: ['openFile'],
-      filters: [{ name: 'Sitemap XML или GZIP', extensions: ['xml', 'gz'] }],
+      title: t('importSitemap'), properties: ['openFile'],
+      filters: [{ name: t('sitemapFiles'), extensions: ['xml', 'gz'] }],
     });
     if (result.canceled || !result.filePaths[0]) return null;
     return { sourceId: catalog.pick(projectId, result.filePaths[0], sourceId).sourceId };
   }));
   handle('pulse:export-catalog', (project: number, input: unknown, selection?: unknown) => withFileDialog(async () => {
+    const locale = activeLocale;
     const projectId = catalogId(project);
     const filter = catalogFilter(input);
     const selected = chosenUrls(selection);
     const file = reportFile(store.project(projectId).name, 'csv');
     const result = await dialog.showSaveDialog(window!, {
-      title: 'Экспорт каталога sitemap', defaultPath: file.name,
+      title: nativeTranslator(locale)('exportSitemap'), defaultPath: file.name,
       filters: [{ name: 'CSV', extensions: ['csv'] }],
     });
-    return saveExport(result, staged => pipeline(catalog.csv(projectId, filter, selected), createWriteStream(staged)));
+    return saveExport(result, staged => pipeline(catalog.csv(projectId, filter, selected), createWriteStream(staged)), locale);
   }));
   handle('pulse:export-backup', saveDatabase);
   handle('pulse:import-backup', restoreDatabase);
   handle('pulse:get-preferences', preferences.get);
   handle('pulse:save-preferences', (input: SaveDesktopPreferences) => {
-    if (preferencesTask) throw new Error('Сохранение настроек уже выполняется.');
+    if (preferencesTask) throw new Error(text()('preferencesBusy'));
     preferencesTask = preferences.save(input).finally(() => { preferencesTask = undefined; });
     return preferencesTask;
   });
+  async function changeLocale(input: unknown) {
+    const locale = await preferences.setLocale(input);
+    if (locale === activeLocale) return locale;
+    activeLocale = locale;
+    refreshNativeUi();
+    if (window && !window.isDestroyed()) window.webContents.send('pulse:locale-changed', locale);
+    return locale;
+  }
+  handle('pulse:get-locale', preferences.getLocale);
+  handle('pulse:set-locale', changeLocale);
 
   if (app.isPackaged && process.platform === 'win32') {
     app.setAppUserModelId('ru.pulseurl.desktop');
     if (process.env.PULSE_DESKTOP_SKIP_PROTOCOL_REGISTRATION !== '1') app.setAsDefaultProtocolClient('pulse-url');
   }
 
-  const menu = [
-    { label: 'Открыть Пульс URL', click: open },
-    { label: 'Экспорт резервной копии…', click: fileAction(saveDatabase) },
-    { label: 'Восстановить резервную копию…', click: fileAction(restoreDatabase) },
-    { type: 'separator' as const },
-    { label: 'Выход', click: () => app.quit() },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Пульс URL', submenu: menu }, { role: 'editMenu' }]));
+  function refreshNativeUi() {
+    const t = text();
+    const title = t('title');
+    const separator = { type: 'separator' } as const;
+    const languageOption = (locale: AppLocale, label: string): Electron.MenuItemConstructorOptions => ({
+      label, type: 'radio', checked: locale === activeLocale,
+      click: () => {
+        if (quitting) return;
+        void changeLocale(locale).catch(error => {
+          refreshNativeUi();
+          void showFailure(text()('title'), error);
+        });
+      },
+    });
+    const menu: Electron.MenuItemConstructorOptions[] = [
+      { label: t('open'), click: open },
+      { label: t('exportBackupMenu'), click: fileAction(saveDatabase) },
+      { label: t('restoreBackupMenu'), click: fileAction(restoreDatabase) },
+      { label: t('language'), submenu: [languageOption('ru-RU', t('russian')), languageOption('en-US', t('english'))] },
+      separator,
+      { label: t('quit'), click: () => app.quit() },
+    ];
+    const edit: Electron.MenuItemConstructorOptions[] = [
+      { role: 'undo', label: t('undo') }, { role: 'redo', label: t('redo') }, separator,
+      { role: 'cut', label: t('cut') }, { role: 'copy', label: t('copy') }, { role: 'paste', label: t('paste') },
+    ];
+    if (process.platform === 'darwin') {
+      edit.push({ role: 'pasteAndMatchStyle', label: t('pasteAndMatchStyle') },
+        { role: 'delete', label: t('delete') }, { role: 'selectAll', label: t('selectAll') }, separator,
+        { label: t('speech'), submenu: [
+          { role: 'startSpeaking', label: t('startSpeaking') }, { role: 'stopSpeaking', label: t('stopSpeaking') },
+        ] });
+    } else {
+      edit.push({ role: 'delete', label: t('delete') }, separator, { role: 'selectAll', label: t('selectAll') });
+    }
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: title, submenu: menu },
+      { label: t('edit'), role: 'editMenu', submenu: edit }]));
+    tray?.setToolTip(title);
+    tray?.setContextMenu(Menu.buildFromTemplate(menu));
+    if (window && !window.isDestroyed()) window.setTitle(title);
+  }
+
   const trayImage = process.platform === 'darwin'
     ? nativeImage.createFromPath(join(desktopAssets, 'pulse-tray-template.png'))
     : appIcon.resize({ width: 20, height: 20, quality: 'best' });
   if (process.platform === 'darwin') trayImage.setTemplateImage(true);
   tray = new Tray(trayImage);
-  tray.setToolTip('Пульс URL');
-  tray.setContextMenu(Menu.buildFromTemplate(menu));
+  refreshNativeUi();
   tray.on('click', open);
   app.on('before-quit', event => {
     if (allowExit) return;
     event.preventDefault();
     if (quitting) return;
     quitting = true;
-    void Promise.allSettled([fileTask, preferencesTask])
+    void Promise.allSettled([fileTask, preferences.waitForWrites()])
       .then(stop)
       .catch(error => console.error(error))
       .finally(exit);

@@ -2,6 +2,10 @@ import { DESKTOP_SHUTDOWN, type DesktopMethod } from '../shared/desktop.js';
 import type { RunRestart } from '../shared/reports.js';
 import { useCallback, useEffect, useState } from 'react';
 import type { Address, Project, Result, Run, Version } from '../shared/types.js';
+import { createTranslator, type AppLocale } from '../shared/i18n/index.js';
+import { isDiagnosticReference, translateDiagnostic, translateReference } from '../shared/i18n/diagnostics.js';
+import { commonMessages } from '../shared/i18n/locales/common.js';
+import { LocalizedError, useLanguage } from './i18n.js';
 
 export interface Workspace {
   projects: Project[];
@@ -36,8 +40,19 @@ export function requestOrigin(input: string) {
   } catch { return undefined; }
 }
 
-export class ApiResponseError extends Error {
-  constructor(readonly status: number, message: string, readonly code?: string) { super(message); }
+const requestFailed = (locale: AppLocale) => createTranslator(locale, 'common', commonMessages)('requestFailed');
+
+export function localizedFailure(error: unknown, locale: AppLocale) {
+  if (error instanceof LocalizedError) return error.translate(locale);
+  if (error instanceof Error) return translateDiagnostic(error.message, locale);
+  return requestFailed(locale);
+}
+
+export class ApiResponseError extends LocalizedError {
+  constructor(readonly status: number, message?: string, readonly code?: string, details?: unknown) {
+    super(locale => isDiagnosticReference(details) ? translateReference(locale, details)
+      : typeof message === 'string' ? translateDiagnostic(message, locale) : requestFailed(locale));
+  }
 }
 
 export async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -47,17 +62,20 @@ export async function api<T>(url: string, options: RequestInit = {}): Promise<T>
     const response = await desktop.request({
       path: url, method: (options.method ?? 'GET') as DesktopMethod,
       body: typeof options.body === 'string' ? options.body : undefined,
+      i18n: true,
     });
     options.signal?.throwIfAborted();
     if (response.status < 200 || response.status >= 300) {
       const failure = response.data as { error?: string; code?: string } | null;
-      throw new ApiResponseError(response.status, failure?.error ?? 'Не удалось выполнить запрос.', failure?.code);
+      throw new ApiResponseError(response.status, failure?.error, failure?.code, failure);
     }
     return response.data as T;
   }
-  const response = await fetch(url, options);
+  const headers = new Headers(options.headers);
+  headers.set('x-urlpulse-i18n', '1');
+  const response = await fetch(url, { ...options, headers });
   const value = await response.json();
-  if (!response.ok) throw new ApiResponseError(response.status, value.error ?? 'Не удалось выполнить запрос.');
+  if (!response.ok) throw new ApiResponseError(response.status, value?.error, value?.code, value);
   return value as T;
 }
 
@@ -68,7 +86,8 @@ export function write<T>(url: string, method: 'POST' | 'PATCH' | 'PUT', payload:
 export function useQuery<T>(
   path: string | null, interval: number | ((data?: T) => number) = 0, revisionOf?: (data: T) => string | undefined,
 ) {
-  const [state, setState] = useState<{ path: string; data?: T; error?: string; status?: number }>();
+  const locale = useLanguage();
+  const [state, setState] = useState<{ path: string; data?: T; error?: unknown; status?: number }>();
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     if (!path) return;
@@ -90,7 +109,7 @@ export function useQuery<T>(
         if (error instanceof ApiResponseError && error.code === DESKTOP_SHUTDOWN.data.code) abort.abort();
         if (!abort.signal.aborted) setState(previous => ({
           path: path!, data: previous?.path === path ? previous.data : undefined,
-          error: (error as Error).message,
+          error,
           status: error instanceof ApiResponseError ? error.status : undefined,
         }));
       } finally {
@@ -104,18 +123,20 @@ export function useQuery<T>(
   const refresh = useCallback(() => setRevision(value => value + 1), []);
   const reset = useCallback(() => { setState(undefined); refresh(); }, [refresh]);
   const current = state?.path === path ? state : undefined;
-  return { data: current?.data, error: current?.error, status: current?.status, refresh, reset };
+  return { data: current?.data, error: current?.error ? localizedFailure(current.error, locale) : undefined,
+    status: current?.status, refresh, reset };
 }
 
 export function useTask() {
+  const locale = useLanguage();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<unknown>();
   async function run(action: () => Promise<void>) {
     setBusy(true);
-    setError('');
+    setError(undefined);
     try { await action(); }
-    catch (failure) { setError((failure as Error).message); }
+    catch (failure) { setError(() => failure); }
     finally { setBusy(false); }
   }
-  return { busy, error, run, clear: () => setError('') };
+  return { busy, error: error ? localizedFailure(error, locale) : '', run, clear: () => setError(undefined) };
 }

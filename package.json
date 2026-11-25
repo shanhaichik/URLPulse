@@ -1,6 +1,6 @@
 {
   "name": "url-pulse",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -29,12 +29,14 @@
   "dependencies": {
     "@js-temporal/polyfill": "^0.5.1",
     "fastify": "^5.7.0",
+    "i18next": "^27.2.9",
     "ipaddr.js": "^2.3.0",
     "lucide-react": "^0.577.0",
     "nodemailer": "^10.6.0",
     "quickjs-emscripten": "^0.32.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-i18next": "^18.0.3",
     "saxes": "^6.0.0"
   },
   "devDependencies": {

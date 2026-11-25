@@ -16,3 +16,4 @@ if [[ ${PULSE_PUBLIC_RELEASE:-0} == 1 ]]; then
   node packaging/release.cjs verify-mac "$bundle" "$image"
 fi
 PULSE_SMOKE_EXECUTABLE="$executable" node e2e/desktop-smoke.mjs
+PULSE_SMOKE_EXECUTABLE="$executable" node e2e/desktop-locale-smoke.mjs

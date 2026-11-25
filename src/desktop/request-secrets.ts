@@ -2,13 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SafeStorage } from 'electron';
+import { defaultLocale, type AppLocale } from '../shared/i18n/index.js';
+import { nativeTranslator } from '../shared/i18n/locales/native.js';
 import { isDesktopRequestSecret, type RequestSecrets } from '../server/request-secrets.js';
 import { atomicFile } from './backup.js';
 
 type Encryption = Pick<SafeStorage, 'isAsyncEncryptionAvailable' | 'encryptStringAsync' | 'decryptStringAsync'>
   & Partial<Pick<SafeStorage, 'getSelectedStorageBackend'>>;
 
-export function desktopRequestSecrets(directory: string, encryption: Encryption): RequestSecrets {
+export function desktopRequestSecrets(directory: string, encryption: Encryption, locale: () => AppLocale = () => defaultLocale): RequestSecrets {
   const secretsDirectory = join(directory, 'request-secrets');
   function encryptionAvailable() {
     const backend = encryption.getSelectedStorageBackend?.();
@@ -21,8 +23,9 @@ export function desktopRequestSecrets(directory: string, encryption: Encryption)
   return {
     mode: 'desktop',
     async save(input) {
+      const t = nativeTranslator(locale());
       if (!('value' in input) || 'environment' in input || typeof input.value !== 'string' || !input.value) {
-        throw new Error('Введите значение секрета для настольного приложения.');
+        throw new Error(t('enterSecret'));
       }
       try {
         if (!await encryptionAvailable()) throw new Error();
@@ -33,7 +36,7 @@ export function desktopRequestSecrets(directory: string, encryption: Encryption)
         await atomicFile(join(secretsDirectory, reference), staged => writeFile(staged, bytes, { mode: 0o600, flush: true }));
         return reference;
       } catch {
-        throw new Error('Хранилище секретов операционной системы недоступно.');
+        throw new Error(t('unavailableSecretStore'));
       }
     },
     async read(reference) {
@@ -47,7 +50,7 @@ export function desktopRequestSecrets(directory: string, encryption: Encryption)
     async remove(reference) {
       if (!isDesktopRequestSecret(reference)) return;
       try { await rm(join(secretsDirectory, reference), { force: true }); }
-      catch { throw new Error('Не удалось удалить секрет из хранилища.'); }
+      catch { throw new Error(nativeTranslator(locale())('removeSecretFailed')); }
     },
   };
 }

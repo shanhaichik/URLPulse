@@ -2,8 +2,11 @@ import { Readable } from 'node:stream';
 import type { ExportFormat } from '../shared/desktop.js';
 import type { DatabaseTasks } from './database-tasks.js';
 import { ApiError, type ExportScope, type Store } from './store.js';
-import { reportChanges, type ReportFilters, type ReportResult } from '../shared/reports.js';
+import type { ReportFilters, ReportResult } from '../shared/reports.js';
 import type { Result } from '../shared/types.js';
+import { translateDiagnostic } from '../shared/i18n/diagnostics.js';
+import { createTranslator, defaultLocale, type AppLocale } from '../shared/i18n/index.js';
+import { exportMessages } from '../shared/i18n/locales/export.js';
 
 const fields = [
   'id', 'runId', 'urlId', 'version', 'url', 'label', 'status', 'httpCode', 'durationMs',
@@ -13,7 +16,6 @@ const fields = [
 
 type ExportRow = Result & Partial<Pick<ReportResult, 'change' | 'previousHttpCode' | 'previousFinalUrl'>>;
 const comparisonFields = ['change', 'previousHttpCode', 'previousFinalUrl'] as const;
-const comparisonHeaders = ['Изменение', 'Предыдущий HTTP-код', 'Предыдущий конечный URL'];
 
 export function escapeCsv(value: string | number | null | undefined) {
   if (value == null) return '';
@@ -22,21 +24,12 @@ export function escapeCsv(value: string | number | null | undefined) {
   return '"' + safe.replaceAll('"', '""') + '"';
 }
 
-const excelHeaders: Record<typeof fields[number], string> = {
-  id: 'ID', runId: 'Запуск', urlId: 'ID адреса', version: 'Версия адреса', url: 'URL', label: 'Название',
-  status: 'Статус', httpCode: 'HTTP-код', durationMs: 'Время ответа (мс)', finalUrl: 'Конечный URL',
-  redirects: 'Переходы', contentType: 'Тип содержимого', contentLength: 'Размер (байт)', errorKind: 'Тип ошибки',
-  tlsCode: 'Код TLS', accessHint: 'Диагностика доступа', error: 'Ошибка', checkedAt: 'Дата проверки (ISO 8601)',
-  requestProfile: 'Профиль запроса', requestRoute: 'Маршрут запроса', failureStage: 'Этап ошибки', proxyHttpCode: 'Код прокси',
-  requestProxy: 'Адрес прокси', requestSource: 'Источник маршрута',
-};
-
 export function exportFormat(value: unknown): ExportFormat {
   if (value === 'csv' || value === 'json' || value === 'excel') return value;
   throw new ApiError(400, 'Выберите CSV, CSV для Excel или JSON.');
 }
 
-export function reportFile(projectName: string, format: ExportFormat, at = new Date()) {
+export function reportFile(projectName: string, format: ExportFormat, at = new Date(), locale: AppLocale = defaultLocale) {
   const extension = format === 'excel' ? 'csv' : format;
   const month = String(at.getMonth() + 1).padStart(2, '0');
   const day = String(at.getDate()).padStart(2, '0');
@@ -50,7 +43,9 @@ export function reportFile(projectName: string, format: ExportFormat, at = new D
     if (remaining < 0) break;
     title += character;
   }
-  return { extension, name: prefix + (title.replace(/[. ]+$/u, '') || 'Проект') + '.' + extension };
+  const filenameLocale = format === 'excel' ? locale : defaultLocale;
+  const name = title.replace(/[. ]+$/u, '') || createTranslator(filenameLocale, 'export', exportMessages)('project');
+  return { extension, name: prefix + name + '.' + extension };
 }
 
 export function downloadDisposition(name: string) {
@@ -59,16 +54,23 @@ export function downloadDisposition(name: string) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${utf8}`;
 }
 
-async function* encode(rows: Iterable<ExportRow> | AsyncIterable<ExportRow>, format: ExportFormat, comparison: boolean) {
+async function* encode(rows: Iterable<ExportRow> | AsyncIterable<ExportRow>, format: ExportFormat, comparison: boolean, locale?: AppLocale) {
   if (format !== 'json') {
-    const separator = format === 'excel' ? ';' : ',';
-    const columns: string[] = format === 'excel' ? fields.map(field => excelHeaders[field]) : [...fields];
-    if (comparison) columns.push(...(format === 'excel' ? comparisonHeaders : comparisonFields));
+    const excel = format === 'excel';
+    const excelLocale = excel ? locale : undefined;
+    const t = createTranslator(excelLocale ?? defaultLocale, 'export', exportMessages);
+    const separator = excel ? ';' : ',';
+    const columns: string[] = excel ? fields.map(field => t(`field_${field}`)) : [...fields];
+    if (comparison) columns.push(...(excel ? [t('change'), t('previousHttp'), t('previousUrl')] : comparisonFields));
     yield '\uFEFF' + columns.join(separator) + '\r\n';
     for await (const row of rows) {
-      const cells = fields.map(field => escapeCsv(row[field]));
+      const cells = fields.map(field => {
+        if (excelLocale && field === 'status') return escapeCsv(t(`result_${row.status}`));
+        if (excelLocale && field === 'error' && row.error) return escapeCsv(translateDiagnostic(row.error, excelLocale));
+        return escapeCsv(row[field]);
+      });
       if (comparison) cells.push(
-        escapeCsv(format === 'excel' && row.change ? reportChanges[row.change] : row.change),
+        escapeCsv(excel && row.change ? t(`change_${row.change}`) : row.change),
         escapeCsv(row.previousHttpCode), escapeCsv(row.previousFinalUrl),
       );
       yield cells.join(separator) + '\r\n';
@@ -84,8 +86,8 @@ async function* encode(rows: Iterable<ExportRow> | AsyncIterable<ExportRow>, for
   }
 }
 
-export function exportStream(rows: Iterable<ExportRow> | AsyncIterable<ExportRow>, format: ExportFormat, comparison = false) {
-  return Readable.from(encode(rows, format, comparison), { objectMode: false });
+export function exportStream(rows: Iterable<ExportRow> | AsyncIterable<ExportRow>, format: ExportFormat, comparison = false, locale?: AppLocale) {
+  return Readable.from(encode(rows, format, comparison, locale), { objectMode: false });
 }
 
 export async function openReportRows(store: Store, project: number, scope: ExportScope, filters: ReportFilters, tasks?: DatabaseTasks) {
@@ -112,9 +114,9 @@ export async function openReportRows(store: Store, project: number, scope: Expor
 }
 
 export async function openReportStream(store: Store, project: number, scope: ExportScope, filters: ReportFilters,
-  format: ExportFormat, tasks?: DatabaseTasks) {
+  format: ExportFormat, tasks?: DatabaseTasks, locale?: AppLocale) {
   const rows = await openReportRows(store, project, scope, filters, tasks);
-  const stream = exportStream(rows, format, scope.runId !== undefined);
+  const stream = exportStream(rows, format, scope.runId !== undefined, locale);
   // The iterator may never start if the destination closes before reading the header.
   stream.once('close', () => { void rows.close().catch(() => {}); });
   return stream;

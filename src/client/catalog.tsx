@@ -5,16 +5,16 @@ import type { ImportResult } from '../shared/types.js';
 import { api, ApiResponseError, base, useQuery, useTask, write } from './api.js';
 import { ConfirmDeletion } from './forms.js';
 import { date, ErrorMessage, FilterSelect, formatNumber, Loading, Modal } from './ui.js';
+import { createTranslator } from '../shared/i18n/index.js';
+import { catalogMessages } from '../shared/i18n/locales/catalog.js';
+import { translateDiagnostic } from '../shared/i18n/diagnostics.js';
+import { createMessages, LocalizedError, useLanguage } from './i18n.js';
+
+const useText = createMessages('catalog', catalogMessages);
 
 type Overview = { sources: CatalogSource[]; jobs: CatalogJob[]; transfer: CatalogTransfer | null };
 type SourceDialog = { type: 'edit'; source: CatalogSource; url: string } | { type: 'delete'; source: CatalogSource };
-const states: Record<CatalogJob['state'], string> = {
-  upload: 'Загрузка файла', queued: 'В очереди', running: 'Импорт', paused: 'На паузе',
-  failed: 'Ошибка импорта', cancelled: 'Отменён', done: 'Готово',
-};
-const changeNames: Record<CatalogChange, string> = {
-  all: 'Все адреса', added: 'Новые', removed: 'Исчезнувшие', changed: 'Изменён lastmod',
-};
+const changes: CatalogChange[] = ['all', 'added', 'removed', 'changed'];
 const activeStates = ['upload', 'queued', 'running', 'paused'];
 const moving = (job?: CatalogTransfer | null) => job?.state === 'queued' || job?.state === 'running';
 const overviewPoll = (data?: Overview) => moving(data?.transfer) || data?.jobs.some(job => activeStates.includes(job.state)) ? 700 : 3_000;
@@ -26,28 +26,30 @@ function query(filter: CatalogFilter) {
 }
 
 function Jobs({ jobs, sources, control }: { jobs: CatalogJob[]; sources: CatalogSource[]; control: (jobId: number, action: string) => void }) {
+  const t = useText();
+  const locale = useLanguage();
   const names = new Map(sources.map(source => [source.id, source.name]));
   return <ul className="catalog-jobs">
       {jobs.map(job => <li key={job.id}>
         <div>
-          <strong>№{job.id} · {states[job.state]}</strong>
+          <strong>{t('importId', { id: job.id })} · {t(`state_${job.state}`)}</strong>
           <small className="catalog-job-counts">{names.get(job.sourceId)} · {date(job.createdAt)}</small>
-          <span className="catalog-job-counts">{formatNumber(job.uniqueUrls)} URL · {job.documentsDone} из {job.documentsTotal} файлов
-            {job.duplicates > 0 && <> · {formatNumber(job.duplicates)} повторов</>}
-            {job.invalid > 0 && <> · {formatNumber(job.invalid)} пропущено</>}
-            {job.bytes > 0 && <> · {Math.round(job.bytes / 1024 / 1024 * 10) / 10} МиБ</>}
+          <span className="catalog-job-counts">{t('importProgress', { urls: formatNumber(job.uniqueUrls), completed: formatNumber(job.documentsDone), total: formatNumber(job.documentsTotal) })}
+            {job.duplicates > 0 && <> · {t('duplicateCount', { count: job.duplicates, value: formatNumber(job.duplicates) })}</>}
+            {job.invalid > 0 && <> · {t('skippedCount', { count: formatNumber(job.invalid) })}</>}
+            {job.bytes > 0 && <> · {t('mebibytes', { count: formatNumber(Math.round(job.bytes / 1024 / 1024 * 10) / 10) })}</>}
           </span>
-          {job.warning && <small>Файл превышает стандартные 50 000 URL или 50 МиБ. Импорт использует увеличенный лимит.</small>}
-          {job.error && <div className="catalog-job-error"><ErrorMessage text={job.error} />
+          {job.warning && <small>{t('largeImportWarning')}</small>}
+          {job.error && <div className="catalog-job-error"><ErrorMessage text={translateDiagnostic(job.error, locale)} />
             {job.problemFile && <small title={job.problemFile}>{job.problemFile}</small>}</div>}
         </div>
         <div className="catalog-buttons">
           {['queued', 'running'].includes(job.state) &&
-            <button className="button small secondary" onClick={() => control(job.id, 'pause')}>Пауза</button>}
+            <button className="button small secondary" onClick={() => control(job.id, 'pause')}>{t('pauseImport')}</button>}
           {['paused', 'failed'].includes(job.state) &&
-            <button className="button small secondary" onClick={() => control(job.id, 'resume')}>Продолжить</button>}
+            <button className="button small secondary" onClick={() => control(job.id, 'resume')}>{t('resumeImport')}</button>}
           {(activeStates.includes(job.state) || job.state === 'failed') &&
-            <button className="button small secondary" onClick={() => control(job.id, 'cancel')}>Отменить</button>}
+            <button className="button small secondary" onClick={() => control(job.id, 'cancel')}>{t('cancelImport')}</button>}
         </div>
       </li>)}
     </ul>;
@@ -56,6 +58,8 @@ function Jobs({ jobs, sources, control }: { jobs: CatalogJob[]; sources: Catalog
 export function CatalogView({ projectId, changed, openRun, openWorklist }: {
   projectId: number; changed: () => void; openRun: (runId: number) => void; openWorklist: () => void;
 }) {
+  const t = useText();
+  const locale = useLanguage();
   const path = base(projectId) + '/catalog';
   const overview = useQuery<Overview>(path, overviewPoll);
   const task = useTask();
@@ -105,7 +109,9 @@ export function CatalogView({ projectId, changed, openRun, openWorklist }: {
         return;
       }
       if (!file) return;
-      if (file.size > CATALOG_FILE_LIMIT) throw new Error('Файл sitemap превышает 256 МиБ.');
+      if (file.size > CATALOG_FILE_LIMIT) {
+        throw new LocalizedError(locale => createTranslator(locale, 'catalog', catalogMessages)('fileTooBig'));
+      }
       const job = await write<CatalogJob>(path + '/imports', 'POST', { fileName: file.name, sourceId: previous });
       setSourceId(job.sourceId);
       setNewSource(false);
@@ -148,29 +154,29 @@ export function CatalogView({ projectId, changed, openRun, openWorklist }: {
   }
 
   return <div className="catalog-view">
-    <section className="panel catalog-panel" aria-label="Источники sitemap">
+    <section className="panel catalog-panel" aria-label={t('sources')}>
       <div className="catalog-heading"><div className="section-heading">
         <span className="section-icon violet"><ListTree size={19} /></span>
-        <div><h2>Каталог sitemap</h2><p>Импортируйте XML или XML.GZ, чтобы выбрать адреса для проверки.</p></div>
+        <div><h2>{t('heading')}</h2><p>{t('description')}</p></div>
       </div><div className="catalog-buttons">
         {canClear && <button type="button" className="button secondary danger-ghost" onClick={() => setConfirmClear(true)}>
-          <Trash2 size={16} /> Очистить каталог</button>}
+          <Trash2 size={16} /> {t('clearCatalog')}</button>}
         {sources.some(source => source.count > 0) && <button type="button" className="button primary"
-          disabled={task.busy || moving(transfer)} onClick={() => setConfirmTransfer(true)}><Plus size={16} /> Добавить все в «Адреса»</button>}
+          disabled={task.busy || moving(transfer)} onClick={() => setConfirmTransfer(true)}><Plus size={16} /> {t('transferAll')}</button>}
         {sources.length > 0 && <button className="button secondary" aria-expanded={newSource} onClick={() => setNewSource(!newSource)}>
-          <Plus size={16} /> Источник</button>}
+          <Plus size={16} /> {t('source')}</button>}
       </div></div>
       <ErrorMessage text={overview.error || (clearedSources === undefined ? task.error : undefined)} />
-      {clearedSources !== undefined && <p className="catalog-feedback" role="status">Каталог очищен. Удалено источников: {formatNumber(clearedSources)}.</p>}
+      {clearedSources !== undefined && <p className="catalog-feedback" role="status">{t('catalogCleared', { count: formatNumber(clearedSources) })}</p>}
       {(!sources.length || newSource) && <form className="catalog-controls" onSubmit={remote}>
-        <label className="catalog-field catalog-grow">Ссылка на sitemap
+        <label className="catalog-field catalog-grow">{t('sitemapLink')}
           <input value={link} onChange={event => setLink(event.target.value)} placeholder="https://example.org/sitemap.xml" type="url" required maxLength={2000} />
         </label>
-        <button className="button primary" disabled={task.busy || !link}>Импортировать</button>
-        {filePicker('Загрузить файл')}
+        <button className="button primary" disabled={task.busy || !link}>{t('import')}</button>
+        {filePicker(t('uploadFile'))}
       </form>}
       {source && <div className="catalog-controls">
-        <label className="catalog-field catalog-grow">Источник
+        <label className="catalog-field catalog-grow">{t('source')}
           <select value={source.id} onChange={event => setSourceId(Number(event.target.value))}>
             {sources.map(entry => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
           </select>
@@ -178,67 +184,69 @@ export function CatalogView({ projectId, changed, openRun, openWorklist }: {
         {source.url
           ? <button className="button secondary" disabled={task.busy || sourceBusy} onClick={() => update(async () => {
             await write(path + '/imports', 'POST', { sourceId: source.id });
-          })}><RefreshCw size={16} /> Обновить</button>
-          : !sourceBusy && filePicker('Загрузить новую версию', source.id)}
+          })}><RefreshCw size={16} /> {t('refreshSource')}</button>
+          : !sourceBusy && filePicker(t('uploadVersion'), source.id)}
         {source.url && <button type="button" className="button secondary" disabled={task.busy || sourceBusy}
-          onClick={() => { task.clear(); setSourceDialog({ type: 'edit', source, url: source.url! }); }}>Изменить ссылку</button>}
+          onClick={() => { task.clear(); setSourceDialog({ type: 'edit', source, url: source.url! }); }}>{t('editSource')}</button>}
         <button type="button" className="button secondary danger-ghost" disabled={task.busy || sourceBusy}
-          onClick={() => { task.clear(); setSourceDialog({ type: 'delete', source }); }}>Удалить источник</button>
+          onClick={() => { task.clear(); setSourceDialog({ type: 'delete', source }); }}>{t('deleteSource')}</button>
       </div>}
     </section>
-    {transfer && <section className="panel catalog-panel" aria-label="Перенос адресов">
+    {transfer && <section className="panel catalog-panel" aria-label={t('transfer')}>
       {moving(transfer) ? <div className="progress-bar catalog-transfer" role="status">
-        <div><strong>{transfer.state === 'queued' ? 'Перенос в очереди' : 'Перенос адресов'}</strong>
-          <span>Обработано: {formatNumber(transfer.processed)}{transfer.total === null ? '' : ' из ' + formatNumber(transfer.total)}</span>
-          <span>Добавлено: {formatNumber(transfer.added)}</span></div>
-        <progress max={transfer.total || 1} value={transfer.total === null ? undefined : transfer.processed} aria-label="Прогресс переноса" />
+        <div><strong>{transfer.state === 'queued' ? t('queuedTransfer') : t('transfer')}</strong>
+          <span>{transfer.total === null
+            ? t('processedCount', { count: formatNumber(transfer.processed) })
+            : t('processedTotal', { count: formatNumber(transfer.processed), total: formatNumber(transfer.total) })}</span>
+          <span>{t('addedCount', { count: formatNumber(transfer.added) })}</span></div>
+        <progress max={transfer.total || 1} value={transfer.total === null ? undefined : transfer.processed} aria-label={t('transferProgress')} />
         <button type="button" className="button small secondary" disabled={task.busy} onClick={() => update(async () => {
           await write(path + '/transfer/' + transfer.id + '/stop', 'POST', {});
-        })}>Остановить перенос</button>
+        })}>{t('stopTransfer')}</button>
       </div> : <div className="catalog-heading">
-        <div role="status"><strong>{transfer.state === 'done' ? 'Перенос завершён' : transfer.state === 'cancelled' ? 'Перенос остановлен' : 'Перенос прервался'}</strong>
-          <p>Добавлено: {formatNumber(transfer.added)} · Уже в списке: {formatNumber(transfer.existing)}</p>
-          {transfer.error && <ErrorMessage text={transfer.error} />}</div>
-        <button className="button secondary" onClick={openWorklist}>Открыть «Адреса»</button>
+        <div role="status"><strong>{transfer.state === 'done' ? t('transferDone') : transfer.state === 'cancelled' ? t('transferStopped') : t('transferFailed')}</strong>
+          <p>{t('transferResult', { added: formatNumber(transfer.added), existing: formatNumber(transfer.existing) })}</p>
+          {transfer.error && <ErrorMessage text={translateDiagnostic(transfer.error, locale)} />}</div>
+        <button className="button secondary" onClick={openWorklist}>{t('openUrls')}</button>
       </div>}
     </section>}
     {source?.currentId && <CatalogTable key={source.id + ':' + source.currentId} projectId={projectId} source={source}
       changed={changed} openRun={openRun} filterChanged={filtered => setFilteredRevision(filtered ? source.currentId ?? undefined : undefined)} />}
     {(!overview.data || waitingForSource) && !overview.error && <Loading />}
     {(recentJobs.length > 0 || historyCursors) && <details className="panel catalog-panel" open>
-      <summary>Импорты</summary>
+      <summary>{t('imports')}</summary>
       <div className="catalog-buttons">
         {historyCursors
-          ? <button type="button" className="button small secondary" onClick={() => setHistoryCursors(undefined)}>Текущие и недавние импорты</button>
-          : <button type="button" className="button small secondary" onClick={() => setHistoryCursors([])}>История импортов</button>}
+          ? <button type="button" className="button small secondary" onClick={() => setHistoryCursors(undefined)}>{t('recentImports')}</button>
+          : <button type="button" className="button small secondary" onClick={() => setHistoryCursors([])}>{t('importHistory')}</button>}
       </div>
       {historyCursors ? <>
         <ErrorMessage text={history.error} />
         {!history.data && !history.error && <Loading />}
-        {history.data?.jobs.length === 0 && <p>На этой странице нет импортов.</p>}
+        {history.data?.jobs.length === 0 && <p>{t('noImports')}</p>}
         {history.data && <Jobs jobs={history.data.jobs} sources={sources} control={controlImport} />}
         <div className="table-footer">
-          <span>Страница {historyCursors.length + 1}</span>
+          <span>{t('page', { page: formatNumber(historyCursors.length + 1) })}</span>
           <div className="catalog-buttons">
             <button type="button" className="button small secondary" disabled={!historyCursors.length}
-              onClick={() => setHistoryCursors(historyCursors.slice(0, -1))}><ChevronLeft size={15} /> Более новые импорты</button>
+              onClick={() => setHistoryCursors(historyCursors.slice(0, -1))}><ChevronLeft size={15} /> {t('newerImports')}</button>
             <button type="button" className="button small secondary" disabled={!history.data?.next}
-              onClick={() => setHistoryCursors([...historyCursors, history.data!.next!])}>Более ранние импорты <ChevronRight size={15} /></button>
+              onClick={() => setHistoryCursors([...historyCursors, history.data!.next!])}>{t('olderImports')} <ChevronRight size={15} /></button>
           </div>
         </div>
       </> : <Jobs jobs={recentJobs} sources={sources} control={controlImport} />}
     </details>}
-    {confirmTransfer && <Modal title="Перенести все адреса из каталога?" close={() => setConfirmTransfer(false)}>
+    {confirmTransfer && <Modal title={t('transferConfirmTitle')} close={() => setConfirmTransfer(false)}>
       <div className="modal-body">
-        <p>В «Адреса» попадут уникальные URL из опубликованных версий всех источников проекта. Выбранный источник и фильтры не ограничивают перенос.</p>
-        <p>Если остановить перенос, уже добавленные адреса останутся в списке.</p>
+        <p>{t('transferConfirmDescription')}</p>
+        <p>{t('transferStopHint')}</p>
       </div>
       <div className="modal-footer">
-        <button type="button" className="button secondary" onClick={() => setConfirmTransfer(false)}>Отмена</button>
+        <button type="button" className="button secondary" onClick={() => setConfirmTransfer(false)}>{t('cancel')}</button>
         <button type="button" className="button primary" disabled={task.busy || moving(transfer)} onClick={() => {
           setConfirmTransfer(false);
           update(async () => { await write(path + '/transfer', 'POST', {}); });
-        }}>Перенести адреса</button>
+        }}>{t('confirmTransfer')}</button>
       </div>
     </Modal>}
     {confirmClear && <ClearCatalogForm path={path + '/clear'} close={() => setConfirmClear(false)} cleared={deleted => {
@@ -252,23 +260,23 @@ export function CatalogView({ projectId, changed, openRun, openWorklist }: {
       overview.reset();
       changed();
     }} />}
-    {sourceDialog && <Modal title={sourceDialog.type === 'edit' ? 'Изменить ссылку на sitemap' : 'Удалить источник sitemap?'}
+    {sourceDialog && <Modal title={sourceDialog.type === 'edit' ? t('editSourceTitle') : t('deleteSourceTitle')}
       close={() => { if (!task.busy) setSourceDialog(undefined); }}>
       <form onSubmit={saveSource}>
         <div className="modal-body form">
           {sourceDialog.type === 'edit' ? <>
-            <label>Ссылка на sitemap
+            <label>{t('sitemapLink')}
               <input value={sourceDialog.url} onChange={event => setSourceDialog({ ...sourceDialog, url: event.target.value })}
                 required type="url" maxLength={2000} autoFocus disabled={task.busy} />
             </label>
-            <p className="field-note">После сохранения нажмите «Обновить». Опубликованная версия сохранится до успешного импорта.</p>
-          </> : <p>Источник «{sourceDialog.source.name}», его версии и история импорта будут удалены. Уже перенесённые URL останутся в «Адресах».</p>}
+            <p className="field-note">{t('editSourceHint')}</p>
+          </> : <p>{t('deleteSourceDescription', { name: sourceDialog.source.name })}</p>}
           <ErrorMessage text={task.error} />
         </div>
         <div className="modal-footer">
-          <button type="button" className="button secondary" disabled={task.busy} onClick={() => setSourceDialog(undefined)}>Отмена</button>
+          <button type="button" className="button secondary" disabled={task.busy} onClick={() => setSourceDialog(undefined)}>{t('cancel')}</button>
           <button type="submit" className={sourceDialog.type === 'edit' ? 'button primary' : 'button danger'} disabled={task.busy}>
-            {sourceDialog.type === 'edit' ? 'Сохранить ссылку' : 'Удалить источник'}
+            {sourceDialog.type === 'edit' ? t('saveSource') : t('deleteSource')}
           </button>
         </div>
       </form>
@@ -277,10 +285,11 @@ export function CatalogView({ projectId, changed, openRun, openWorklist }: {
 }
 
 function ClearCatalogForm({ path, close, cleared }: { path: string; close: () => void; cleared: (deleted: number) => void }) {
+  const t = useText();
   const { data, error, reset } = useQuery<CatalogClearPreview>(path);
   const hasOperations = data && (data.activeImports > 0 || data.transferActive);
-  return <ConfirmDeletion title="Очистить каталог sitemap?" label={hasOperations ? 'Остановить и очистить' : 'Очистить каталог'}
-    close={close} ready={!!data?.sources && !error} pendingLabel="Очищаем каталог…" confirm={async () => {
+  return <ConfirmDeletion title={t('clearCatalogConfirm')} label={hasOperations ? t('stopAndClear') : t('clearCatalog')}
+    close={close} ready={!!data?.sources && !error} pendingLabel={t('clearingCatalog')} confirm={async () => {
       if (!data) return;
       try {
         const { deleted } = await write<{ deleted: number }>(path, 'POST', { confirmation: data.confirmation });
@@ -291,21 +300,22 @@ function ClearCatalogForm({ path, close, cleared }: { path: string; close: () =>
       }
     }}>
     <ErrorMessage text={error} />
-    {error && <button type="button" className="button secondary" onClick={reset}>Обновить предпросмотр</button>}
+    {error && <button type="button" className="button secondary" onClick={reset}>{t('refreshPreview')}</button>}
     {!data && !error && <Loading />}
     {data && <>
-      <p>Проект <strong>«{data.projectName}»</strong></p>
-      <p><strong>Источников: {formatNumber(data.sources)}</strong> · Записей импорта: {formatNumber(data.imports)}.<br />
-        URL в опубликованных версиях: {formatNumber(data.publishedUrls)} суммарно по источникам.</p>
-      <p>Будут удалены все источники проекта, их версии и история импорта. Операция необратима.</p>
-      <p>Импорты и перенос в «Адреса» будут остановлены. Уже перенесённые URL и отчёты сохранятся.</p>
-      {hasOperations && <p>Активных импортов: {formatNumber(data.activeImports)}. {data.transferActive && 'Перенос в «Адреса» в работе или в очереди.'}</p>}
+      <p>{t('project')} <strong>{t('quotedName', { name: data.projectName })}</strong></p>
+      <p><strong>{t('sourceCount', { count: formatNumber(data.sources) })}</strong> · {t('importRecordCount', { count: formatNumber(data.imports) })}<br />
+        {t('publishedUrlCount', { count: formatNumber(data.publishedUrls) })}</p>
+      <p>{t('clearCatalogDescription')}</p>
+      <p>{t('clearCatalogStopsOperations')}</p>
+      {hasOperations && <p>{t('activeImportCount', { count: formatNumber(data.activeImports) })} {data.transferActive && t('activeTransfer')}</p>}
     </>}
   </ConfirmDeletion>;
 }
 
 function CatalogTable({ projectId, source, changed, openRun, filterChanged }: { projectId: number; source: CatalogSource; changed: () => void;
   openRun: (runId: number) => void; filterChanged: (filtered: boolean) => void }) {
+  const t = useText();
   const path = base(projectId) + '/catalog';
   const unfiltered: CatalogFilter = { sourceId: source.id, revision: source.currentId!, change: 'all' };
   const [domain, setDomain] = useState('');
@@ -314,8 +324,7 @@ function CatalogTable({ projectId, source, changed, openRun, filterChanged }: { 
   const [cursors, setCursors] = useState<string[]>([]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [limit, setLimit] = useState('100');
-  const [feedback, setFeedback] = useState('');
-  const [report, setReport] = useState<number>();
+  const [feedback, setFeedback] = useState<{ runId: number } | ImportResult>();
   const page = useQuery<CatalogPage>(path + '/page' + query({ ...filters, after: cursors.at(-1) }));
   const rows = page.data?.items ?? [];
   const task = useTask();
@@ -325,14 +334,14 @@ function CatalogTable({ projectId, source, changed, openRun, filterChanged }: { 
   const canExport = !draftChanged && !task.busy && !!page.data && !page.error;
   const canAct = canExport && (selected.size > 0 || (rows.length > 0 && validLimit));
   const allSelected = rows.length > 0 && rows.every(row => selected.has(row.url));
-  const applied = [source.name, filters.domain && `домен ${filters.domain}`, filters.prefix && `путь ${filters.prefix}`,
-    changeNames[filters.change ?? 'all'], filters.direction === 'desc' ? 'по убыванию' : 'по возрастанию'].filter(Boolean).join(' · ');
+  const applied = [source.name, filters.domain && t('domainSummary', { domain: filters.domain }), filters.prefix && t('pathSummary', { path: filters.prefix }),
+    t(`change_${filters.change ?? 'all'}`), filters.direction === 'desc' ? t('descendingSummary') : t('ascendingSummary')].filter(Boolean).join(' · ');
 
   function apply(updated: CatalogFilter) {
     if (!cursors.length && page.error && query(updated) === query(filters)) page.reset();
     setFilters(updated);
     filterChanged(!!(updated.domain || updated.prefix || updated.change !== 'all'));
-    setCursors([]); setSelected(new Set()); setFeedback(''); task.clear();
+    setCursors([]); setSelected(new Set()); setFeedback(undefined); task.clear();
   }
 
   function toggle(urls: string[], checked: boolean) {
@@ -348,11 +357,10 @@ function CatalogTable({ projectId, source, changed, openRun, filterChanged }: { 
 
   function act(action: 'check' | 'add') {
     void task.run(async () => {
-      setFeedback(''); setReport(undefined);
+      setFeedback(undefined);
       const selection = selected.size ? { selected: [...selected] } : { limit: number };
       const result = await write<ImportResult | { id: number }>(path + '/actions', 'POST', { ...filters, action, ...selection });
-      if ('id' in result) { setFeedback('Проверка поставлена в очередь.'); setReport(result.id); }
-      else setFeedback(`В работе добавлено: ${result.added} · Повторы: ${result.duplicates}`);
+      setFeedback('id' in result ? { runId: result.id } : result);
       changed();
     });
   }
@@ -366,7 +374,7 @@ function CatalogTable({ projectId, source, changed, openRun, filterChanged }: { 
       } else if (chosen) {
         const response = await fetch(path + '/export', { method: 'POST',
           headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...filters, selected: chosen }) });
-        if (!response.ok) throw new Error((await response.json()).error ?? 'Не удалось выгрузить CSV.');
+        if (!response.ok) throw new Error((await response.json()).error ?? t('exportFailed'));
         const encodedName = response.headers.get('Content-Disposition')?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
         const filename = encodedName ? decodeURIComponent(encodedName) : 'pulse-sitemap.csv';
         const link = URL.createObjectURL(await response.blob());
@@ -377,69 +385,70 @@ function CatalogTable({ projectId, source, changed, openRun, filterChanged }: { 
     });
   }
 
-  return <section className="panel catalog-panel catalog-table-panel" aria-label="Адреса из sitemap">
+  return <section className="panel catalog-panel catalog-table-panel" aria-label={t('sitemapUrls')}>
     <div className="catalog-heading">
-      <h2>Адреса из sitemap</h2>
+      <h2>{t('sitemapUrls')}</h2>
       <div className="catalog-counts">
-        <span>{formatNumber(source.count)} URL</span>
-        <span>Новые {formatNumber(source.added)}</span><span>Исчезли {formatNumber(source.removed)}</span>
-        <span>Изменены {formatNumber(source.changed)}</span>
+        <span>{t('urlCount', { count: formatNumber(source.count) })}</span>
+        <span>{t('newCount', { count: formatNumber(source.added) })}</span><span>{t('removedCount', { count: formatNumber(source.removed) })}</span>
+        <span>{t('changedCount', { count: formatNumber(source.changed) })}</span>
       </div>
     </div>
     <form className="catalog-controls" onSubmit={event => { event.preventDefault(); apply({ ...filters, domain: domain.trim(), prefix: prefix.trim() }); }}>
-      <label className="catalog-field catalog-grow">Домен<input value={domain} onChange={event => setDomain(event.target.value)} placeholder="example.org" maxLength={255} /></label>
-      <label className="catalog-field catalog-grow">Начало пути<input value={prefix} onChange={event => setPrefix(event.target.value)} placeholder="/catalog/" maxLength={2000} /></label>
-      <button className="button secondary">Найти</button>
-      <label className="catalog-field">Изменения
+      <label className="catalog-field catalog-grow">{t('domain')}<input value={domain} onChange={event => setDomain(event.target.value)} placeholder="example.org" maxLength={255} /></label>
+      <label className="catalog-field catalog-grow">{t('pathPrefix')}<input value={prefix} onChange={event => setPrefix(event.target.value)} placeholder="/catalog/" maxLength={2000} /></label>
+      <button className="button secondary">{t('search')}</button>
+      <label className="catalog-field">{t('changes')}
         <FilterSelect value={filters.change} onChange={event => apply({ ...filters, change: event.target.value as CatalogChange })}>
-          {Object.entries(changeNames).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+          {changes.map(change => <option value={change} key={change}>{t(`change_${change}`)}</option>)}
         </FilterSelect>
       </label>
-      <label className="catalog-field">Сортировка
+      <label className="catalog-field">{t('sort')}
         <FilterSelect value={filters.direction ?? 'asc'} onChange={event => apply({ ...filters, direction: event.target.value === 'desc' ? 'desc' : undefined })}>
-          <option value="asc">По возрастанию</option><option value="desc">По убыванию</option>
+          <option value="asc">{t('ascending')}</option><option value="desc">{t('descending')}</option>
         </FilterSelect>
       </label>
       <button type="button" className="button secondary" disabled={!draftChanged && query(filters) === query(unfiltered) && !cursors.length}
-        onClick={() => { setDomain(''); setPrefix(''); apply(unfiltered); }}>Сбросить фильтры</button>
+        onClick={() => { setDomain(''); setPrefix(''); apply(unfiltered); }}>{t('resetFilters')}</button>
     </form>
-    <p><strong>Применено</strong> · {applied}</p>
-    {draftChanged && <p role="status">Примените изменения кнопкой «Найти».</p>}
-    {selected.size > 0 ? <p>Проверка и перенос охватят выбранные URL ({formatNumber(selected.size)}).</p>
-      : validLimit && <p>Проверка и перенос охватят до {formatNumber(number)} первых URL по применённым условиям.</p>}
+    <p><strong>{t('applied')}</strong> · {applied}</p>
+    {draftChanged && <p role="status">{t('applyDraft')}</p>}
+    {selected.size > 0 ? <p>{t('selectionScope', { count: formatNumber(selected.size) })}</p>
+      : validLimit && <p>{t('filterScope', { count: formatNumber(number) })}</p>}
     <div className="catalog-controls catalog-actions">
-      {selected.size ? <button className="text-button" onClick={() => setSelected(new Set())}>Снять выбор</button>
-        : <label className="catalog-field catalog-limit">Первые URL по фильтру
+      {selected.size ? <button className="text-button" onClick={() => setSelected(new Set())}>{t('clearSelection')}</button>
+        : <label className="catalog-field catalog-limit">{t('limit')}
           <input value={limit} onChange={event => setLimit(event.target.value)} type="number" min="1" max="5000" />
         </label>}
-      <button className="button primary" disabled={!canAct} onClick={() => act('check')}><Play size={14} /> Проверить</button>
-      <button className="button secondary" disabled={!canAct} onClick={() => act('add')}><Plus size={15} /> В рабочий список</button>
+      <button className="button primary" disabled={!canAct} onClick={() => act('check')}><Play size={14} /> {t('check')}</button>
+      <button className="button secondary" disabled={!canAct} onClick={() => act('add')}><Plus size={15} /> {t('addToUrls')}</button>
       {!window.pulseDesktop && canExport
-        ? <a className="button secondary" href={path + '/export' + query(filters)} download><Download size={15} /> CSV по фильтру</a>
-        : <button className="button secondary" disabled={!canExport} onClick={() => save(false)}><Download size={15} /> CSV по фильтру</button>}
-      {selected.size > 0 && <button className="button secondary" disabled={!canExport} onClick={() => save(true)}><Download size={15} /> CSV выбранных</button>}
+        ? <a className="button secondary" href={path + '/export' + query(filters)} download><Download size={15} /> {t('filteredCsv')}</a>
+        : <button className="button secondary" disabled={!canExport} onClick={() => save(false)}><Download size={15} /> {t('filteredCsv')}</button>}
+      {selected.size > 0 && <button className="button secondary" disabled={!canExport} onClick={() => save(true)}><Download size={15} /> {t('selectedCsv')}</button>}
     </div>
     <ErrorMessage text={page.error || task.error} />
-    {page.error && <button type="button" className="button small secondary" onClick={page.reset}><RefreshCw size={15} /> Повторить</button>}
-    {feedback && <div className="catalog-feedback" role="status">{feedback}
-      {report && <button className="text-button" onClick={() => openRun(report)}>Открыть отчёт</button>}</div>}
+    {page.error && <button type="button" className="button small secondary" onClick={page.reset}><RefreshCw size={15} /> {t('retry')}</button>}
+    {feedback && <div className="catalog-feedback" role="status">{'runId' in feedback
+      ? <>{t('queuedRun')} <button className="text-button" onClick={() => openRun(feedback.runId)}>{t('openReport')}</button></>
+      : t('worklistAddition', { added: formatNumber(feedback.added), duplicates: formatNumber(feedback.duplicates) })}</div>}
     {!page.data && !page.error && <Loading />}
     {page.data && (rows.length ? <div className="table-scroll"><table className="data-table catalog-table">
       <thead><tr>
-        <th className="check-cell"><input type="checkbox" aria-label="Выбрать страницу" checked={allSelected} onChange={event => toggle(rows.map(row => row.url), event.target.checked)} /></th>
-        <th scope="col">URL</th><th scope="col">Lastmod в sitemap</th><th scope="col">Изменение</th>
+        <th className="check-cell"><input type="checkbox" aria-label={t('selectPage')} checked={allSelected} onChange={event => toggle(rows.map(row => row.url), event.target.checked)} /></th>
+        <th scope="col">URL</th><th scope="col">{t('lastmod')}</th><th scope="col">{t('change')}</th>
       </tr></thead>
       <tbody>{rows.map(row => <tr key={row.url} className={selected.has(row.url) ? 'highlight' : undefined}>
-        <td className="check-cell"><input type="checkbox" aria-label={'Выбрать ' + row.url} checked={selected.has(row.url)}
+        <td className="check-cell"><input type="checkbox" aria-label={t('selectUrl', { url: row.url })} checked={selected.has(row.url)}
           disabled={selected.size === 5000 && !selected.has(row.url)} onChange={event => toggle([row.url], event.target.checked)} /></td>
         <td className="catalog-url" title={row.url}>{row.url}</td>
-        <td>{row.lastmod ?? '—'}</td><td>{row.change ? changeNames[row.change] : '—'}</td>
+        <td>{row.lastmod ?? '—'}</td><td>{row.change ? t(`change_${row.change}`) : '—'}</td>
       </tr>)}</tbody>
-    </table></div> : <div className="empty"><h3>Адресов по этим условиям нет</h3></div>)}
+    </table></div> : <div className="empty"><h3>{t('noMatches')}</h3></div>)}
     <div className="table-footer">
-      <span>Страница {cursors.length + 1}</span><div className="catalog-buttons">
-        <button className="button small secondary" disabled={!cursors.length} onClick={() => setCursors(cursors.slice(0, -1))}><ChevronLeft size={15} /> Назад</button>
-        <button className="button small secondary" disabled={!page.data?.next} onClick={() => setCursors([...cursors, page.data!.next!])}>Далее <ChevronRight size={15} /></button>
+      <span>{t('page', { page: formatNumber(cursors.length + 1) })}</span><div className="catalog-buttons">
+        <button className="button small secondary" disabled={!cursors.length} onClick={() => setCursors(cursors.slice(0, -1))}><ChevronLeft size={15} /> {t('back')}</button>
+        <button className="button small secondary" disabled={!page.data?.next} onClick={() => setCursors([...cursors, page.data!.next!])}>{t('next')} <ChevronRight size={15} /></button>
       </div>
     </div>
   </section>;

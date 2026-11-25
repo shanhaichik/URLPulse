@@ -30,6 +30,13 @@ test('restricts desktop requests and file exports to the typed application route
   expect(reportArguments('pulse-url://example.com/?project=2&run=7')).toBeUndefined();
 });
 
+test('forwards structured diagnostics only when a desktop request explicitly opts in', () => {
+  const request = { method: 'GET', path: '/api/projects' } as const;
+  expect(desktopRequest(request)).not.toHaveProperty('i18n');
+  expect(desktopRequest({ ...request, i18n: true })).toHaveProperty('i18n', true);
+  expect(() => desktopRequest({ ...request, i18n: '1' as unknown as true })).toThrow(/Недопустимая операция/);
+});
+
 test('creates a consistent SQLite backup while writes are open and validates the import', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pulse-desktop-'));
   const source = join(directory, 'source.sqlite3');
