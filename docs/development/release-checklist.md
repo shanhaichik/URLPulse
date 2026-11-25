@@ -13,7 +13,7 @@ Use the exact commit intended for release. Public releases provide GitHub's sour
 
 ## GitHub verification
 
-- [ ] Open a pull request to protected `main`. Check **Tests and coverage** on Linux and **Desktop checks** on Apple Silicon, Intel, and Windows x64. Review the results on the PR tip and the resulting `main` commit.
+- [ ] Open a pull request to protected `main`. Check **Tests and coverage** on Linux and **Desktop checks** on Apple Silicon (`macos-15`), Intel (`macos-15-intel`), and Windows x64. Review the results on the PR tip and the resulting `main` commit.
 - [ ] Review native Intel PAC checks and the Windows installer smoke for the current changes. Older workflow runs document earlier releases.
 - [ ] Point a new annotated `vX.Y.Z` tag at the approved `main` commit. Check that it matches the version in that commit.
 - [ ] Run **Source release** from the default branch with the tag and `publish: false`. Verify that it checks both successful workflows on the tagged commit.
@@ -35,7 +35,7 @@ Use the exact commit intended for release. Public releases provide GitHub's sour
 
 ### Проверки на GitHub
 
-- [ ] Открыть pull request в защищённую `main`. Проверить **Tests and coverage** на Linux и **Desktop checks** на Apple Silicon, Intel и Windows x64. Сверить прогоны на коммите PR и на коммите `main` после слияния.
+- [ ] Открыть pull request в защищённую `main`. Проверить **Tests and coverage** на Linux и **Desktop checks** на Apple Silicon (`macos-15`), Intel (`macos-15-intel`) и Windows x64. Сверить прогоны на коммите PR и на коммите `main` после слияния.
 - [ ] Проверить нативный сценарий PAC на Intel и smoke установщика Windows для текущих изменений. Прежние прогоны относятся к предыдущим выпускам.
 - [ ] Поставить новый аннотированный тег `vX.Y.Z` на согласованный коммит `main`. Сверить тег с версией в этом коммите.
 - [ ] Запустить **Source release** из основной ветки с тегом и `publish: false`. Убедиться, что workflow проверил оба успешных прогона на коммите тега.

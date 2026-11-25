@@ -20,7 +20,7 @@ jobs:
             build: npm run make:windows
             name: windows-x64
             folder: installers
-          - os: macos-26
+          - os: macos-15
             build: npm run make:mac -- --arch=arm64
             name: macos-arm64
             folder: make/dmg/arm64
@@ -45,7 +45,24 @@ jobs:
       - name: Run unit tests
         run: npm test -- --maxWorkers=2 --testTimeout=20000
       - if: runner.os == 'Windows'
-        run: choco install nsis --yes --no-progress
+        name: Prepare NSIS 3.13
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'nsis-3.13.zip'
+          $url = 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip'
+          curl.exe --fail --location --silent --show-error --retry 2 --max-time 75 `
+            --proto '=https' --proto-redir '=https' --output $archive $url
+          if ($LASTEXITCODE -ne 0) { throw "NSIS download failed ($LASTEXITCODE)." }
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($hash -ne 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8') {
+            throw 'Unexpected SHA-256 for the NSIS 3.13 archive.'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          $nsis = Join-Path $env:RUNNER_TEMP 'nsis-3.13'
+          $compiler = Join-Path $nsis 'Bin\makensis.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'NSIS compiler was not extracted.' }
+          "PULSE_MAKENSIS=$compiler" >> $env:GITHUB_ENV
+          "NSISDIR=$nsis" >> $env:GITHUB_ENV
       - run: ${{ matrix.build }}
       - if: runner.os == 'macOS'
         shell: bash

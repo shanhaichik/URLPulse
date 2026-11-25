@@ -3,7 +3,7 @@ import { networkInterfaces } from 'node:os';
 import { parentPort } from 'node:worker_threads';
 import { getQuickJS, type QuickJSContext, type QuickJSHandle } from 'quickjs-emscripten';
 import { pacHelpers } from './pac-helpers.js';
-import type { PacDnsRequest, PacWorkerReply, PacWorkerRequest } from './pac.js';
+import type { PacDnsRequest, PacWorkerEvent, PacWorkerReply, PacWorkerRequest } from './pac.js';
 
 const maxDnsLookups = 8;
 const maxResultBytes = 4_096;
@@ -108,3 +108,4 @@ port.on('message', (request: PacWorkerRequest) => {
   try { port.postMessage(evaluate(request)); }
   catch { port.postMessage({ error: 'runtime' } satisfies PacWorkerReply); }
 });
+port.postMessage({ ready: true } satisfies PacWorkerEvent);

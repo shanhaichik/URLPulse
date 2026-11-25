@@ -20,6 +20,7 @@ const workerErrors = {
 export type PacWorkerRequest = { source: string; args?: readonly [url: string, host: string] };
 export type PacWorkerReply = { value: string } | { error: keyof typeof workerErrors };
 export type PacDnsRequest = { hostname: string; buffer: SharedArrayBuffer };
+export type PacWorkerEvent = { ready: true } | PacWorkerReply | PacDnsRequest;
 
 interface Job {
   request: PacWorkerRequest;
@@ -34,11 +35,13 @@ interface Job {
 interface Slot {
   worker: Worker;
   job?: Job;
+  ready?: boolean;
   retiring?: boolean;
 }
 
 const maxWorkers = 4;
 const maxWaitingJobs = 128;
+const workerStartupTimeoutMs = 5_000;
 const workerTimeoutMs = 2_500;
 const waiting: Job[] = [];
 const slots = new Set<Slot>();
@@ -61,6 +64,15 @@ function finish(job: Job, result: { value: string } | { error: unknown }) {
   job.dns?.cancel();
   if ('error' in result) job.reject(result.error);
   else job.resolve(result.value);
+}
+
+function setJobDeadline(slot: Slot, job: Job, timeoutMs: number, message: string) {
+  clearTimeout(job.timer);
+  job.timer = setTimeout(() => {
+    retire(slot);
+    finish(job, { error: new PacError(message) });
+    dispatch();
+  }, timeoutMs);
 }
 
 async function answerDns(job: Job, { hostname, buffer }: PacDnsRequest) {
@@ -89,8 +101,13 @@ function makeSlot(): Slot {
   const failed = () => {
     if (slot.job) finish(slot.job, { error: new PacError(workerErrors.runtime) });
   };
-  worker.on('message', (reply: PacWorkerReply | PacDnsRequest) => {
+  worker.on('message', (reply: PacWorkerEvent) => {
     if (!slot.job || slot.retiring) return;
+    if ('ready' in reply) {
+      slot.ready = true;
+      setJobDeadline(slot, slot.job, workerTimeoutMs, workerErrors.timeout);
+      return;
+    }
     if ('hostname' in reply) {
       void answerDns(slot.job, reply);
       return;
@@ -125,11 +142,8 @@ function dispatch() {
       job.slot = selected;
       selected.worker.ref();
       selected.worker.postMessage(job.request);
-      job.timer = setTimeout(() => {
-        retire(selected);
-        finish(job, { error: new PacError(workerErrors.timeout) });
-        dispatch();
-      }, workerTimeoutMs);
+      if (selected.ready) setJobDeadline(selected, job, workerTimeoutMs, workerErrors.timeout);
+      else setJobDeadline(selected, job, workerStartupTimeoutMs, workerErrors.runtime);
     } catch {
       if (slot) retire(slot);
       finish(job, { error: new PacError(workerErrors.runtime) });

@@ -432,7 +432,7 @@ test('downloads the root and nested sitemap via the configured project PAC in th
     const uploaded = await app.inject({ method: 'PUT', url: path + '/proxy-pac', payload: {
       filename: 'office.pac', source: `function FindProxyForURL() { return 'HTTPS proxy.example:${proxyPort}'; }`,
     } });
-    expect(uploaded.statusCode).toBe(200);
+    expect(uploaded.statusCode, uploaded.body).toBe(200);
     const result = await app.inject({ method: 'POST', url: path + '/urls/sitemap',
       payload: { url: `https://target.example:${targetPort}/index.xml` } });
     expect(result.json()).toMatchObject({ added: 1, documents: 2 });
