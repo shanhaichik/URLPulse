@@ -9,6 +9,7 @@
 - Set one email language for all projects in Electron settings or through `PULSE_EMAIL_LOCALE` in the web server. Russian is the default.
 - Updated guides, screenshots, and the demo for both languages. Added translation instructions and catalog checks.
 - Project PAC now applies to sitemap imports in URLs and Catalog. Project-specific trusted proxies support corporate IP addresses, hostname CONNECT, and Basic over HTTPS. Catalog jobs capture the PAC revision when queued.
+- Separate startup and evaluation deadlines let valid PAC files load when the worker is slow to initialize.
 
 See the [user guide](docs/user/README.en.md) and [localization report](docs/localization/FINAL_REPORT.en.md).
 
