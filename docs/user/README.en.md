@@ -127,9 +127,15 @@ Electron encrypts secrets through the operating system. Leaving a saved secret f
 
 Use **Upload PAC file** under **Settings → HTTP requests** to load a UTF-8 `.pac` file up to 256 KiB. **Test route** shows the route source and order for a URL. Each project uses one active PAC, which can be replaced or disabled.
 
-For HTTPS, the supported routes are `DIRECT` and public `PROXY` and `HTTPS` proxies. HTTP URLs use a direct route. The next PAC route can be tried after a connection failure. A TLS error or proxy `407` stops the check. PAC's `dnsResolve()` uses IPv4 DNS queries, so routes can differ from browser results that depend on the hosts file or browser DNS settings.
+For HTTPS, the supported routes are `DIRECT` and `PROXY` or `HTTPS` proxies. HTTP URLs use a direct route. The next PAC route can be tried after a connection failure. A TLS error or proxy `407` stops the request. PAC's `dnsResolve()` uses IPv4 DNS queries, so routes can differ from browser results that depend on the hosts file or browser DNS settings.
 
-A manual profile proxy takes precedence. Profiles with site headers and credentials can still use the project PAC. The app reevaluates PAC on redirects and captures the PAC revision when a run is queued. The active revision and revisions referenced by runs are included in a database backup.
+Choose **Add trusted proxy** and enter the same scheme, hostname, and port as the PAC route. The directive `PROXY proxy.example.com:8080` corresponds to `http://proxy.example.com:8080`. The rule belongs to the current project.
+
+- **Allow a private proxy IP** permits RFC 1918 and IPv6 ULA addresses for the selected proxy. URLPulse blocks loopback and link-local and validates the target address on every hop.
+- **Send the target hostname in CONNECT** delegates the final IP choice to the proxy. Enable it for proxies that restrict their connections to public targets.
+- **Basic authentication** requires an `https://` address and a trusted proxy certificate. Enter the password in Electron. In web mode, set a `PULSE_REQUEST_SECRET_…` environment variable before launching the server and enter its name in the form. A fallback proxy uses its own configuration. Set up secrets for the destination installation when restoring a backup on another computer.
+
+URL checks, sitemap imports into **URLs**, and remote **Catalog** downloads use the project PAC. For checks, a manual profile proxy takes precedence, and **No profile** selects a direct route. PAC is reevaluated for nested sitemaps and redirects. Runs and catalog jobs record PAC and trusted proxies when queued, and quick imports capture them when they start. Replacing the PAC keeps its trusted proxies for new jobs. Disabling it clears the project list.
 
 ## Data, backup, and privacy
 

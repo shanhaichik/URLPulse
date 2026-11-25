@@ -25,7 +25,7 @@ function validRoute(method: DesktopRequest['method'], path: string) {
   if (comparisonRequest) return method === 'GET' && numberId(comparisonRequest[1]);
   const pacRequest = /^\/api\/projects\/(\d+)\/proxy-pac(\/test)?$/.exec(pathname);
   if (pacRequest) return numberId(pacRequest[1]) && (pacRequest[2] ? method === 'POST'
-    : method === 'GET' || method === 'PUT' || method === 'DELETE');
+    : method === 'GET' || method === 'PUT' || method === 'PATCH' || method === 'DELETE');
   if (method === 'PUT') return false;
   if (validRoutes[method].test(pathname)) return true;
   const match = requestProfileRoutes[method].exec(pathname);

@@ -4,8 +4,8 @@ import nodemailer from 'nodemailer';
 import type { PacRouteResolver } from '../shared/pac.js';
 import type { ResolvedRequestOptions } from '../shared/request-profiles.js';
 import type { CheckResult, TlsProfile } from '../shared/types.js';
-import { checkUrl } from './checker.js';
-import { createPacRouteResolver } from './pac.js';
+import { checkUrl, type PacRequestOptions } from './checker.js';
+import { pacReferences, pacRequestOptions, type StoredPac } from './pac-config.js';
 import { configurationFailure, profileReferences, releaseRequestSecrets, resolveRequestOptions,
   type SavedRequestProfile } from './request-profiles.js';
 import { envRequestSecrets, type RequestSecrets } from './request-secrets.js';
@@ -15,7 +15,7 @@ import { emailMessages } from '../shared/i18n/locales/email.js';
 
 export type SendEmail = (job: EmailJob) => Promise<void>;
 export type CheckUrl = (url: string, profile: TlsProfile, signal: AbortSignal, options?: ResolvedRequestOptions,
-  pac?: PacRouteResolver) => Promise<CheckResult>;
+  pac?: PacRouteResolver, pacProxy?: PacRequestOptions['pacProxy']) => Promise<CheckResult>;
 
 export function smtpSender(env: NodeJS.ProcessEnv, origin: string, preferred: AppLocale | (() => AppLocale) =
   parseLocale(env.PULSE_EMAIL_LOCALE)): SendEmail | undefined {
@@ -76,7 +76,7 @@ async function writeResult(action: () => void | Promise<void>) {
   }
 }
 
-function runChecker(check: CheckUrl, profiles: SavedRequestProfile[], secrets: RequestSecrets, pac?: PacRouteResolver) {
+function runChecker(check: CheckUrl, profiles: SavedRequestProfile[], secrets: RequestSecrets, { pac, pacProxy }: PacRequestOptions) {
   const byId = new Map(profiles.map(profile => [profile.id, profile]));
   const defaults = new Map(profiles.filter(profile => profile.isDefault).map(profile => [profile.origin, profile]));
   const resolved = new Map<number, Promise<ResolvedRequestOptions | undefined>>();
@@ -85,18 +85,18 @@ function runChecker(check: CheckUrl, profiles: SavedRequestProfile[], secrets: R
       const result = await check(url, tls, signal);
       return pac ? { ...result, requestRoute: 'direct' } : result;
     }
-    if (choice === null && defaults.size === 0) return check(url, tls, signal, undefined, pac);
+    if (choice === null && defaults.size === 0) return check(url, tls, signal, undefined, pac, pacProxy);
     const origin = new URL(url).origin;
     const profile = choice === null ? defaults.get(origin) : byId.get(choice);
     if (choice !== null && (!profile || profile.origin !== origin)) {
       return configurationFailure(url, profile, 'Назначенный профиль запроса недоступен для этого сервера.');
     }
-    if (!profile) return check(url, tls, signal, undefined, pac);
+    if (!profile) return check(url, tls, signal, undefined, pac, pacProxy);
     if (!resolved.has(profile.id)) resolved.set(profile.id, resolveRequestOptions(profile, secrets, signal).catch(() => undefined));
     const options = await resolved.get(profile.id);
     if (!options) return configurationFailure(url, profile);
     if (signal.aborted) return configurationFailure(url, profile);
-    return check(url, tls, signal, options, options.proxy ? undefined : pac);
+    return options.proxy ? check(url, tls, signal, options) : check(url, tls, signal, options, pac, pacProxy);
   };
 }
 
@@ -110,14 +110,15 @@ async function processRun(store: Store, check: CheckUrl, secrets: RequestSecrets
   const canCheck = () => !stopped() && !signal.aborted;
   const requeue = () => tasks?.run('requeue', run.id) ?? store.requeue(run.id);
   let profiles: SavedRequestProfile[] = [];
+  let config: StoredPac | undefined;
   try {
     if (run.source === 'schedule' && !schedulesEnabled()) {
       await writeResult(requeue);
       return;
     }
     profiles = store.requestSnapshot(run.id);
-    const config = store.pacSnapshot(run.id);
-    const checkItem = runChecker(check, profiles, secrets, config ? createPacRouteResolver(config.source) : undefined);
+    config = store.pacSnapshot(run.id);
+    const checkItem = runChecker(check, profiles, secrets, pacRequestOptions(config, ref => secrets.read(ref)));
     let batch = run.items;
     while (canCheck() && batch.length) {
       const items = batch;
@@ -151,12 +152,12 @@ async function processRun(store: Store, check: CheckUrl, secrets: RequestSecrets
     await writeResult(requeue);
     throw error;
   } finally {
-    await releaseRequestSecrets(store, secrets, profiles.flatMap(profileReferences));
+    await releaseRequestSecrets(store, secrets, [...profiles.flatMap(profileReferences), ...pacReferences(config)]);
   }
 }
 
 export function startBackground(store: Store, {
-  check = (url, tlsProfile, signal, requestOptions, pac) => checkUrl(url, { tlsProfile, signal, requestOptions, pac }),
+  check = (url, tlsProfile, signal, requestOptions, pac, pacProxy) => checkUrl(url, { tlsProfile, signal, requestOptions, pac, pacProxy }),
   tasks, send, getSend = () => send, schedulesEnabled = () => true, reportError = console.error,
   requestSecrets = envRequestSecrets(),
 }: {

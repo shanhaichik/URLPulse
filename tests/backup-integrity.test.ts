@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { expect, test } from 'vitest';
 import { createBackup, prepareImport } from '../src/desktop/backup.js';
 import { Store } from '../src/server/store.js';
+import { parsePacFile, withPacProxies } from '../src/server/pac-config.js';
 
 function finishFirst(store: Store) {
   const project = store.createProject('Действительная история', '').id;
@@ -77,6 +78,57 @@ test('preserves checked history from an older stopped run without a known comple
       restored.close();
       await staged.dispose();
     }
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(['non-array policy', 'unknown rule field'])('rejects a PAC backup with %s', async kind => {
+  const directory = await mkdtemp(join(tmpdir(), 'pulse-backup-pac-'));
+  const source = join(directory, 'input.sqlite3');
+  const store = new Store(source);
+  try {
+    const { id } = store.createProject('PAC backup', '');
+    const pac = parsePacFile('office.pac', "function FindProxyForURL() { return 'DIRECT'; }");
+    const unexpected = { url: 'https://proxy.example:8443', allowPrivate: false, connectByHostname: false, note: 'fixture' };
+    store.savePac(id, kind === 'non-array policy' ? pac : withPacProxies(pac, [unexpected]));
+    if (kind === 'non-array policy') {
+      const db = new DatabaseSync(source);
+      try { db.prepare('UPDATE project_pac_versions SET proxy_rules=?').run('{}'); }
+      finally { db.close(); }
+    }
+    const result = await prepareImport(source, directory).then(async staged => {
+      await staged.dispose();
+      return 'accepted';
+    }, (error: Error) => error.cause instanceof Error ? error.cause.message : error.message);
+    expect(result).toBe('В резервной копии повреждены версии PAC-файлов.');
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test.each([false, true])('restores PAC settings from a backup with proxy rules present=%s', async withRules => {
+  const directory = await mkdtemp(join(tmpdir(), 'pulse-backup-pac-valid-'));
+  const source = join(directory, 'input.sqlite3');
+  const store = new Store(source);
+  try {
+    const { id } = store.createProject('PAC backup', '');
+    const pac = parsePacFile('office.pac', "function FindProxyForURL() { return 'DIRECT'; }");
+    const proxy = { url: 'https://proxy.example:8443', allowPrivate: true, connectByHostname: true,
+      auth: { username: 'fixture', ref: 'PULSE_REQUEST_SECRET_FIXTURE' } };
+    const config = withRules ? withPacProxies(pac, [proxy]) : pac;
+    store.savePac(id, config);
+    if (!withRules) {
+      const db = new DatabaseSync(source);
+      try { db.exec('ALTER TABLE project_pac_versions DROP COLUMN proxy_rules; ALTER TABLE catalog_imports DROP COLUMN pac_revision'); }
+      finally { db.close(); }
+    }
+    const staged = await prepareImport(source, directory);
+    const restored = new Store(staged.file);
+    try { expect(restored.projectPac(id)).toEqual(config); }
+    finally { restored.close(); await staged.dispose(); }
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });

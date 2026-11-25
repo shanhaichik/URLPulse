@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { RequestAuthView, RequestHeaderView, RequestProfileView, RequestSecretInput, ResolvedRequestOptions } from '../shared/request-profiles.js';
 import type { CheckResult } from '../shared/types.js';
 import { normalizeUrl, withDeadline } from './checker.js';
-import { isRequestSecretReference, type RequestSecrets } from './request-secrets.js';
+import { isRequestSecretReference, validRequestSecretValue, type RequestSecrets } from './request-secrets.js';
 import { ApiError, type Store } from './store.js';
 
 type ProfileHeader = { name: string; value: string } | { name: string; ref: string };
@@ -76,6 +76,31 @@ export function profileReferences(profile: ProfileConfig): string[] {
   return refs;
 }
 
+export async function saveRequestSecret(secret: unknown, retained: string | undefined, secrets: RequestSecrets,
+  staged: string[]): Promise<string> {
+  if (secret === undefined && retained) return retained;
+  const invalid = () => new ApiError(400, 'Задайте секрет для авторизации или заголовка.');
+  if (secret === undefined) throw invalid();
+  const data = object(secret);
+  let input: RequestSecretInput;
+  if (validRequestSecretValue(data.value) && data.environment === undefined) {
+    input = { value: data.value };
+  } else if (typeof data.environment === 'string' && data.value === undefined) {
+    input = { environment: data.environment.trim() };
+  } else throw invalid();
+  let ref: string;
+  try { ref = await secrets.save(input); }
+  catch { throw new ApiError(400, secrets.mode === 'desktop'
+    ? 'Не удалось сохранить секрет в хранилище системы.' : 'Укажите настроенную переменную PULSE_REQUEST_SECRET_…'); }
+  if (secrets.mode === 'desktop') staged.push(ref);
+  return ref;
+}
+
+export function requestSecretView(ref: string, mode: RequestSecrets['mode']) {
+  return mode === 'environment' && ref.startsWith('PULSE_REQUEST_SECRET_')
+    ? { configured: true, environment: ref } : { configured: true };
+}
+
 export async function parseRequestProfile(input: unknown, previous: SavedRequestProfile | undefined, secrets: RequestSecrets,
   staged: string[]): Promise<ProfileConfig> {
   const value = object(input);
@@ -86,25 +111,7 @@ export async function parseRequestProfile(input: unknown, previous: SavedRequest
   }
   const sameSite = previous?.origin === site ? previous : undefined;
   const names = new Set<string>();
-  async function saveSecret(secret: unknown, retained?: string): Promise<string> {
-    if (secret === undefined && retained) return retained;
-    if (secret === undefined) throw new ApiError(400, 'Задайте секрет для авторизации или заголовка.');
-    const data = object(secret);
-    if (typeof data.value === 'string' && data.value.length > 0 && Buffer.byteLength(data.value) <= VALUE_LIMIT
-      && !/[\x00-\x1f\x7f]/.test(data.value) && data.environment === undefined) {
-      return record({ value: data.value });
-    }
-    if (typeof data.environment === 'string' && data.value === undefined) return record({ environment: data.environment.trim() });
-    throw new ApiError(400, 'Задайте секрет для авторизации или заголовка.');
-  }
-  async function record(input: RequestSecretInput) {
-    try {
-      const ref = await secrets.save(input);
-      if (secrets.mode === 'desktop') staged.push(ref);
-      return ref;
-    } catch { throw new ApiError(400, secrets.mode === 'desktop'
-      ? 'Не удалось сохранить секрет в хранилище системы.' : 'Укажите настроенную переменную PULSE_REQUEST_SECRET_…'); }
-  }
+  const saveSecret = (secret: unknown, retained?: string) => saveRequestSecret(secret, retained, secrets, staged);
 
   const headers: ProfileHeader[] = [];
   for (const entry of value.headers) {
@@ -163,7 +170,7 @@ export async function parseRequestProfile(input: unknown, previous: SavedRequest
 }
 
 export function requestProfileView(profile: SavedRequestProfile, mode: RequestSecrets['mode']): RequestProfileView {
-  const secret = (ref: string) => mode === 'environment' ? { configured: true, environment: ref } : { configured: true };
+  const secret = (ref: string) => requestSecretView(ref, mode);
   const headers: RequestHeaderView[] = profile.headers.map(header => 'ref' in header
     ? { name: header.name, secret: true, ...secret(header.ref) }
     : { name: header.name, secret: false, value: header.value });
@@ -201,7 +208,7 @@ export async function resolveRequestOptions(profile: SavedRequestProfile, secret
   async function read(ref: string) {
     deadline.throwIfAborted();
     const value = await withDeadline(secrets.read(ref), deadline);
-    if (!value || Buffer.byteLength(value) > VALUE_LIMIT || /[\x00-\x1f\x7f]/.test(value)) throw new RequestSecretError();
+    if (!validRequestSecretValue(value)) throw new RequestSecretError();
     protectedValues.add(value);
     return value;
   }

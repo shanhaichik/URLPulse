@@ -19,7 +19,7 @@ const requestSecrets = envRequestSecrets();
 prepareProfileDirectory(dirname(databasePath), !process.env.URL_PULSE_DB);
 const { path: database, release: releaseDatabase } = ownDatabase(databasePath);
 const store = new Store(database, Date.now, false);
-const catalog = new CatalogService(database);
+const catalog = new CatalogService(database, undefined, { store, secrets: requestSecrets });
 const tasks = new DatabaseTasks(database);
 const app = createApp({
   store, catalog, tasks, origin, requestSecrets, webAccessKey: accessKey, logger: true, smtpConfigured: !!send,

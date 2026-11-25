@@ -157,7 +157,7 @@ async function start() {
   activeLocale = preferences.getLocale();
   const requestSecrets = desktopRequestSecrets(directory, safeStorage, () => activeLocale);
   const store = new Store(database);
-  const catalog = new CatalogService(database);
+  const catalog = new CatalogService(database, undefined, { store, secrets: requestSecrets });
   const tasks = new DatabaseTasks(database);
   catalog.start();
   const api = createApp({

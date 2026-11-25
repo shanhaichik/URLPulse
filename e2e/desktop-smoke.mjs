@@ -128,6 +128,13 @@ try {
     }),
   }), pacPath);
   assert.equal(pac.status, 200, JSON.stringify(pac.data));
+  const corporateProxy = { url: 'https://proxy.office.test:8443', allowPrivate: true, connectByHostname: true };
+  const trusted = await page.evaluate(({ path, revision, proxy }) => window.pulseDesktop.request({
+    method: 'PATCH', path, body: JSON.stringify({ revision, proxies: [proxy] }),
+  }), { path: pacPath, revision: pac.data.pac.revision, proxy: corporateProxy });
+  assert.equal(trusted.status, 200, JSON.stringify(trusted.data));
+  assert.deepEqual(trusted.data.pac.proxies, [corporateProxy]);
+  assert.notEqual(trusted.data.pac.revision, pac.data.pac.revision);
   const preview = await page.evaluate(path => window.pulseDesktop.request({
     method: 'POST', path: path + '/test', body: JSON.stringify({ url: 'https://example.com/' }),
   }), pacPath);
@@ -416,7 +423,7 @@ try {
   await page.getByText('В проекте пока нет адресов', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Журнал запусков' }).click();
   await page.locator('.run-table').getByRole('button', { name: 'Открыть отчёт' }).first().waitFor();
-  console.log('Desktop smoke passed: version, TLS, HTTP profiles, PAC import and background routing, run cancellation and restart, report history, CSV/Excel/JSON, save cancellation and retry, sitemap source selection, complete transfer, backup restore cancellation, rejection and retry, and catalog and worklist clearing.');
+  console.log('Desktop smoke passed: version, TLS, HTTP profiles, PAC import, trusted proxy settings and background routing, run cancellation and restart, report history, CSV/Excel/JSON, save cancellation and retry, sitemap source selection, complete transfer, backup restore cancellation, rejection and retry, and catalog and worklist clearing.');
 } finally {
   await app?.close().catch(() => {});
   await rm(directory, { force: true, recursive: true });

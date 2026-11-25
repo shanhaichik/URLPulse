@@ -4,11 +4,13 @@ import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import type { Duplex } from 'node:stream';
 import ipaddr from 'ipaddr.js';
-import type { PacRoute, PacRouteResolver } from '../shared/pac.js';
+import type { PacProxyRule, PacRoute, PacRouteResolver } from '../shared/pac.js';
 import type { ResolvedRequestOptions } from '../shared/request-profiles.js';
 import type { CheckResult, TlsProfile } from '../shared/types.js';
-import { PacError } from './pac.js';
+import { normalizePacProxyUrl, PacError } from './pac.js';
+import type { StoredPacProxy } from './pac-config.js';
 import { connectTargetTls, openProxyTunnel, pinnedLookup, ProxyRequestError, type Endpoint } from './request-proxy.js';
+import { validRequestSecretValue, type RequestSecrets } from './request-secrets.js';
 import { russianTrustRoots, TlsProfileError } from './tls-profile.js';
 
 type ErrorKind = NonNullable<CheckResult['errorKind']>;
@@ -20,7 +22,12 @@ interface HttpResult { code: number; headers: IncomingHttpHeaders; body?: Buffer
 type Resolve = (hostname: string) => Promise<Endpoint[]>;
 type Request = (url: URL, addresses: Endpoint[], signal: AbortSignal, maxBytes: number, ca: string[] | undefined,
   stream: boolean | undefined, headers: Record<string, string>) => Promise<HttpResult>;
-interface Options {
+export interface PacRequestOptions {
+  pac?: PacRouteResolver;
+  pacProxy?: { rules: ReadonlyMap<string, StoredPacProxy>; readSecret: RequestSecrets['read'] };
+}
+
+interface Options extends PacRequestOptions {
   resolve?: Resolve;
   request?: Request;
   timeoutMs?: number;
@@ -28,7 +35,6 @@ interface Options {
   signal?: AbortSignal;
   stream?: boolean;
   requestOptions?: ResolvedRequestOptions;
-  pac?: PacRouteResolver;
 }
 
 const redirectCodes = new Set([301, 302, 303, 307, 308]);
@@ -45,6 +51,10 @@ function publicIp(value: string) {
   if (address.kind() === 'ipv4') return true;
   return (address as ipaddr.IPv6).match(globalIPv6 as ipaddr.IPv6, 3)
     && !(address as ipaddr.IPv6).match(ipaddr.IPv6.parse('3fff::'), 20);
+}
+
+function allowedProxyIp(value: string, allowPrivate = false) {
+  return publicIp(value) || (allowPrivate && ['private', 'uniqueLocal'].includes(ipaddr.process(value).range()));
 }
 
 export function normalizeUrl(input: string): string {
@@ -141,7 +151,7 @@ function sendTargetRequest(url: URL, addresses: Endpoint[], signal: AbortSignal,
   });
 }
 
-async function resolvePublicHost(host: string, resolve: Resolve, signal: AbortSignal): Promise<Endpoint[]> {
+async function resolvePublicHost(host: string, resolve: Resolve, signal: AbortSignal, allowPrivate = false): Promise<Endpoint[]> {
   const family = isIP(host);
   let addresses: Endpoint[];
   try {
@@ -152,16 +162,18 @@ async function resolvePublicHost(host: string, resolve: Resolve, signal: AbortSi
     throw new RequestError('dns', 'Не удалось разрешить имя хоста (DNS).');
   }
   if (!addresses.length) throw new RequestError('dns', 'DNS не вернул IP-адрес.');
-  if (addresses.some(({ address, family }) => !family || isIP(address) !== family || !publicIp(address))) {
+  if (addresses.some(({ address, family }) => !family || isIP(address) !== family || !allowedProxyIp(address, allowPrivate))) {
     throw new RequestError('blocked', 'Хост разрешается в непубличный IP-адрес.');
   }
   return addresses;
 }
 
-function parseProxyUrl(config: NonNullable<ResolvedRequestOptions['proxy']>) {
+export function parseProxyUrl(config: NonNullable<ResolvedRequestOptions['proxy']>, rule?: PacProxyRule) {
   try {
     if (!/^https?:\/\/[^/?#@\\]+\/?$/i.test(config.url)) throw new Error();
-    const url = new URL(normalizeUrl(config.url));
+    const url = new URL(rule ? normalizePacProxyUrl(config.url) : normalizeUrl(config.url));
+    const host = bareHost(url.hostname);
+    if (rule && isIP(host) && !allowedProxyIp(host, rule.allowPrivate)) throw new Error();
     if (config.authorization !== undefined) {
       if (url.protocol !== 'https:') throw new Error();
       validateHeaderValue('proxy-authorization', config.authorization);
@@ -193,18 +205,20 @@ interface RequestProgress {
   stage?: 'pac' | 'proxy' | 'target';
   route?: NonNullable<CheckResult['requestRoute']>;
   proxy?: string;
+  protectedValues?: Set<string>;
 }
 
 async function proxyTunnel(proxy: URL, authorization: string | undefined, target: URL, targetAddress: Endpoint,
-  resolve: Resolve, signal: AbortSignal) {
+  resolve: Resolve, signal: AbortSignal, rule?: StoredPacProxy) {
   let addresses: Endpoint[];
   try {
-    addresses = await resolvePublicHost(bareHost(proxy.hostname), resolve, signal);
+    addresses = await resolvePublicHost(bareHost(proxy.hostname), resolve, signal, rule?.allowPrivate);
   } catch (error) {
     if (signal.aborted) throw signal.reason;
-    throw new ProxyRequestError('Прокси должен разрешаться в публичный IP-адрес.', null, error);
+    throw new ProxyRequestError(rule?.allowPrivate ? 'Адрес доверенного прокси недоступен или запрещён.'
+      : 'Прокси должен разрешаться в публичный IP-адрес.', null, error);
   }
-  return openProxyTunnel(proxy, addresses, authorization, target, targetAddress, signal);
+  return openProxyTunnel(proxy, addresses, authorization, target, targetAddress, signal, rule?.connectByHostname);
 }
 
 const pacSelectionError = () => new RequestError('configuration', 'Не удалось выбрать маршрут по PAC.');
@@ -230,7 +244,7 @@ function canRetryProxy(error: unknown) {
 }
 
 async function openPacRoute(routes: PacRoute[], target: URL, targetAddress: Endpoint, resolve: Resolve,
-  signal: AbortSignal, deadline: number, progress: RequestProgress) {
+  signal: AbortSignal, deadline: number, progress: RequestProgress, pacProxy?: PacRequestOptions['pacProxy']) {
   for (const [index, route] of routes.entries()) {
     signal.throwIfAborted();
     if (route.kind === 'direct') {
@@ -242,22 +256,41 @@ async function openPacRoute(routes: PacRoute[], target: URL, targetAddress: Endp
     progress.stage = 'pac';
     progress.route = undefined;
     progress.proxy = undefined;
-    const proxy = parseProxyUrl({ url: route.url });
+    const rule = pacProxy?.rules.get(route.url);
+    const proxy = parseProxyUrl({ url: route.url }, rule);
     progress.route = 'proxy';
     progress.proxy = proxy.origin;
     if (target.protocol !== 'https:') {
       throw new RequestError('configuration', 'Прокси поддерживает только адреса HTTPS.');
     }
     progress.stage = 'proxy';
+    const attemptProxy = async (attemptSignal: AbortSignal) => {
+      let authorization: string | undefined;
+      if (rule?.auth) {
+        if (proxy.protocol !== 'https:') {
+          throw new RequestError('configuration', 'Для авторизации прокси требуется HTTPS-подключение к нему.');
+        }
+        const value = await withDeadline(pacProxy!.readSecret(rule.auth.ref), attemptSignal).catch(() => undefined);
+        attemptSignal.throwIfAborted();
+        if (!validRequestSecretValue(value)) {
+          throw new RequestError('configuration', 'Секрет доверенного прокси недоступен или не настроен.');
+        }
+        const encoded = Buffer.from(rule.auth.username + ':' + value).toString('base64');
+        authorization = 'Basic ' + encoded;
+        const protectedValues = progress.protectedValues ??= new Set();
+        protectedValues.add(value).add(encoded).add(authorization);
+      }
+      return proxyTunnel(proxy, authorization, target, targetAddress, resolve, attemptSignal, rule);
+    };
     const remaining = routes.length - index;
-    if (remaining === 1) return proxyTunnel(proxy, undefined, target, targetAddress, resolve, signal);
+    if (remaining === 1) return attemptProxy(signal);
 
     // Reserve time for the remaining routes if this proxy's DNS or CONNECT stalls.
     const attempt = new AbortController();
     const timer = setTimeout(() => attempt.abort(new RequestError('timeout', 'Истекло время подключения к прокси.')),
       (deadline - performance.now()) / remaining);
     try {
-      return await proxyTunnel(proxy, undefined, target, targetAddress, resolve, AbortSignal.any([signal, attempt.signal]));
+      return await attemptProxy(AbortSignal.any([signal, attempt.signal]));
     } catch (error) {
       signal.throwIfAborted();
       if (!canRetryProxy(error)) throw error;
@@ -303,7 +336,7 @@ async function follow(input: string, progress: RequestProgress, maxBytes: number
       if (proxy) {
         progress.stage = 'proxy';
         tunnel = await proxyTunnel(proxy, profile?.proxy?.authorization, url, addresses[0], resolve, signal);
-      } else if (routes) tunnel = await openPacRoute(routes, url, addresses[0], resolve, signal, deadline, progress);
+      } else if (routes) tunnel = await openPacRoute(routes, url, addresses[0], resolve, signal, deadline, progress, options.pacProxy);
       progress.stage = 'target';
       let response: HttpResult;
       try {
@@ -365,8 +398,8 @@ function classify(error: unknown): { errorKind: ErrorKind; error: string; tlsCod
   return { errorKind: 'connection', error: 'Ошибка сетевого соединения' + (code ? ` (${code}).` : '.') };
 }
 
-function redactResultText(profile?: ResolvedRequestOptions) {
-  const sensitive = [...(profile?.protectedValues ?? []), profile?.proxy?.authorization ?? ''].filter(Boolean);
+function redactResultText(profile?: ResolvedRequestOptions, pacSecrets?: ReadonlySet<string>) {
+  const sensitive = [...(profile?.protectedValues ?? []), profile?.proxy?.authorization ?? '', ...(pacSecrets ?? [])].filter(Boolean);
   const variants = new Set<string>();
   for (const value of sensitive) {
     variants.add(value);
@@ -421,7 +454,7 @@ export async function checkUrl(input: string, options: Options = {}): Promise<Ch
     failure = classify(error);
   }
   const response = progress.response;
-  const redact = redactResultText(profile);
+  const redact = redactResultText(profile, progress.protectedValues);
   const contentType = response?.headers['content-type'];
   const contentLength = response?.headers['content-length'];
   return {
@@ -449,11 +482,12 @@ export async function checkUrl(input: string, options: Options = {}): Promise<Ch
   };
 }
 
-export async function downloadPublicFile(input: string, maxBytes: number, timeoutMs: number, tlsProfile?: TlsProfile): Promise<Buffer> {
+export async function downloadPublicFile(input: string, maxBytes: number, timeoutMs: number, tlsProfile?: TlsProfile,
+  network?: PacRequestOptions): Promise<Buffer> {
   const progress: RequestProgress = { finalUrl: input, redirects: 0 };
   let response: HttpResult;
   try {
-    response = await follow(input, progress, maxBytes, { timeoutMs, tlsProfile });
+    response = await follow(input, progress, maxBytes, { timeoutMs, tlsProfile, ...network });
   } catch (error) {
     const failure = classify(error);
     throw new Error(failure.error + (failure.tlsCode ? ` (${failure.tlsCode})` : ''), { cause: error });
@@ -462,11 +496,11 @@ export async function downloadPublicFile(input: string, maxBytes: number, timeou
   return response.body ?? Buffer.alloc(0);
 }
 
-export async function openSitemapStream(input: string, tlsProfile: TlsProfile, signal: AbortSignal) {
+export async function openSitemapStream(input: string, tlsProfile: TlsProfile, signal: AbortSignal, network?: PacRequestOptions) {
   const progress: RequestProgress = { finalUrl: input, redirects: 0 };
   let response: HttpResult;
   try {
-    response = await follow(input, progress, 0, { tlsProfile, signal, stream: true });
+    response = await follow(input, progress, 0, { tlsProfile, signal, stream: true, ...network });
   } catch (error) {
     const failure = classify(error);
     throw new Error(failure.error + (failure.tlsCode ? ` (${failure.tlsCode})` : ''), { cause: error });

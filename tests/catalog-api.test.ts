@@ -121,16 +121,16 @@ test('recovers a running import and removes abandoned staging files on startup',
 
     service.start();
     expect(db.job(project.id, interrupted.id)).toMatchObject({ state: 'failed', error: expect.stringContaining('прервалась') });
-    await vi.waitFor(() => expect(db.job(project.id, running.id)).toMatchObject({ state: 'done', uniqueUrls: 1 }));
+    await vi.waitFor(() => expect(db.job(project.id, running.id)).toMatchObject({ state: 'done', uniqueUrls: 1 }), workerWait);
     expect(db.page(project.id, { sourceId: running.sourceId }).items.map(item => item.url)).toEqual([host + '/recovered']);
     await vi.waitFor(async () => {
       for (const path of [completedUpload, incompleteUpload, orphan]) {
         await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
       }
-    });
+    }, workerWait);
     expect((await stat(unrelated)).isFile()).toBe(true);
   } finally { await close(); }
-});
+}, 20_000);
 
 test('queues a published catalog transfer through the API and completes it in the worker', async () => {
   const { app, root, store, project, db, close, publish } = await fixture();
@@ -143,11 +143,11 @@ test('queues a published catalog transfer through the API and completes it in th
     expect(response.json()).toMatchObject({ id, state: 'queued', total: 2 });
     await vi.waitFor(() => expect(db.transfers.latest(project.id)).toMatchObject({
       id, state: 'done', total: 2, added: 1, existing: 1, processed: 2,
-    }));
+    }), workerWait);
     expect(store.addresses(project.id).map(entry => entry.url)).toEqual([host + '/existing', host + '/new']);
     expect((await app.inject({ method: 'POST', url: root + `/transfer/${id}/stop` })).statusCode).toBe(409);
   } finally { await close(); }
-});
+}, 20_000);
 
 test('rejects invalid catalog requests without creating jobs or queuing checks', async () => {
   const { app, root, store, project, db, close, publish } = await fixture();

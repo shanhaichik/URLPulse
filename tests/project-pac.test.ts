@@ -5,6 +5,7 @@ import { startBackground } from '../src/server/worker.js';
 import { desktopRequest } from '../src/desktop/contracts.js';
 import { MAX_PAC_BYTES } from '../src/shared/pac.js';
 import { parsePacFile } from '../src/server/pac-config.js';
+import type { RequestSecrets } from '../src/server/request-secrets.js';
 
 const pacFile = (route: string) => ({
   filename: 'work.pac',
@@ -138,7 +139,97 @@ test('uses PAC in manual and scheduled runs, preserving the HTTP profile and exp
 test('only allows the scoped PAC commands through the Electron request bridge', () => {
   const path = '/api/projects/3/proxy-pac';
   expect(desktopRequest({ method: 'PUT', path, body: '{}' }).path).toBe(path);
+  expect(desktopRequest({ method: 'PATCH', path, body: '{}' }).path).toBe(path);
   expect(desktopRequest({ method: 'POST', path: path + '/test' }).path).toBe(path + '/test');
   expect(() => desktopRequest({ method: 'PUT', path: '/api/projects/3/settings' })).toThrow();
   expect(() => desktopRequest({ method: 'GET', path: '/api/projects/0/proxy-pac' })).toThrow();
+});
+
+test('versions trusted proxy rules and keeps a desktop password until the queued run is stopped', async () => {
+  const values = new Map<string, string>();
+  let nextReference = 0;
+  const secrets: RequestSecrets = {
+    mode: 'desktop',
+    async save(input) {
+      if (!('value' in input)) throw new Error('Use a desktop value');
+      const ref = 'desktop-00000000-0000-4000-8000-' + String(++nextReference).padStart(12, '0');
+      values.set(ref, input.value);
+      return ref;
+    },
+    async read(ref) { return values.get(ref); },
+    async remove(ref) { values.delete(ref); },
+  };
+  const store = new Store(':memory:');
+  const app = createApp({ store, requestSecrets: secrets });
+  try {
+    const { id } = store.createProject('Office', '');
+    const other = store.createProject('Other', '').id;
+    const path = `/api/projects/${id}/proxy-pac`;
+    const file = pacFile('HTTPS proxy.office.test:8443');
+    const upload = (url = path) => app.inject({ method: 'PUT', url, payload: file });
+    const original = (await upload()).json().pac;
+    await upload(`/api/projects/${other}/proxy-pac`);
+    const proxy = { url: 'https://PROXY.office.test:8443/', allowPrivate: true, connectByHostname: true };
+    const patch = (revision: string, replacement: unknown[]) => app.inject({
+      method: 'PATCH', url: path, payload: { revision, proxies: replacement },
+    });
+    const first = await patch(original.revision, [{ ...proxy, auth: { username: 'alice', secret: { value: 'first-fixture-value' } } }]);
+    expect(first.statusCode).toBe(200);
+    expect(first.json().pac.proxies).toEqual([{ ...proxy, url: 'https://proxy.office.test:8443', auth: { username: 'alice', configured: true } }]);
+    expect(first.body).not.toMatch(/first-fixture-value|desktop-00000000/);
+    expect(first.json().pac.revision).not.toBe(original.revision);
+    expect((await app.inject(`/api/projects/${other}/proxy-pac`)).json().pac).toEqual(original);
+    expect((await upload()).json().pac).toEqual(first.json().pac);
+    expect([...values.values()]).toEqual(['first-fixture-value']);
+    store.addUrls(id, [{ input: 'https://public.example/', line: 1 }]);
+    const run = store.enqueue(id);
+    const second = await patch(first.json().pac.revision, [{ ...proxy, auth: { username: 'alice', secret: { value: 'second-fixture-value' } } }]);
+    expect(second.statusCode).toBe(200);
+    expect(second.json().pac.revision).not.toBe(first.json().pac.revision);
+    expect(store.pacSnapshot(run.id)?.revision).toBe(first.json().pac.revision);
+    expect([...values.values()]).toEqual(['first-fixture-value', 'second-fixture-value']);
+    expect((await patch(first.json().pac.revision, [])).statusCode).toBe(409);
+    expect((await app.inject({ method: 'DELETE', url: path })).json()).toEqual({ pac: null });
+    expect([...values.values()]).toEqual(['first-fixture-value']);
+    expect((await app.inject({ method: 'POST', url: `/api/projects/${id}/runs/${run.id}/stop` })).statusCode).toBe(200);
+    expect([...values.values()]).toEqual([]);
+  } finally { await app.close(); store.close(); }
+});
+
+test('validates scheme, authority and uniqueness of trusted proxies', async () => {
+  const store = new Store(':memory:');
+  const app = createApp({ store });
+  try {
+    const { id } = store.createProject('Office', '');
+    const url = `/api/projects/${id}/proxy-pac`;
+    const { revision } = (await app.inject({ method: 'PUT', url, payload: pacFile('DIRECT') })).json().pac;
+    const proxy = { url: 'http://proxy.office.test:8080', allowPrivate: true, connectByHostname: true };
+    for (const proxies of [
+      [{ ...proxy, url: 'http://user:password@proxy.office.test:8080' }],
+      [{ ...proxy, url: 'https://proxy.office.test/path' }],
+      [{ ...proxy, auth: { username: 'alice', secret: { environment: 'PULSE_REQUEST_SECRET_FIXTURE' } } }],
+      [proxy, { ...proxy, url: 'http://PROXY.office.test:8080/' }],
+    ]) {
+      expect((await app.inject({ method: 'PATCH', url, payload: { revision, proxies } })).statusCode).toBe(400);
+    }
+    expect((await app.inject(url)).json().pac).toEqual({ filename: 'work.pac', revision });
+  } finally { await app.close(); store.close(); }
+});
+
+test('previews only literal proxy IPs permitted by the matching trust rule', async () => {
+  const store = new Store(':memory:');
+  const app = createApp({ store });
+  try {
+    const { id } = store.createProject('Private route', '');
+    const url = `/api/projects/${id}/proxy-pac`;
+    for (const [host, allowPrivate, status] of [
+      ['10.1.2.3', false, 400], ['10.1.2.3', true, 200], ['127.0.0.1', true, 400], ['169.254.1.1', true, 400],
+    ] as const) {
+      const { revision } = (await app.inject({ method: 'PUT', url, payload: pacFile(`PROXY ${host}:8080`) })).json().pac;
+      expect((await app.inject({ method: 'PATCH', url, payload: { revision, proxies: [
+        { url: `http://${host}:8080`, allowPrivate, connectByHostname: true },
+      ] } })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'POST', url: url + '/test', payload: { url: 'https://example.test/' } })).statusCode).toBe(status);
+    }
+  } finally { await app.close(); store.close(); }
 });

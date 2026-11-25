@@ -5,9 +5,13 @@ import { type Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Worker } from 'node:worker_threads';
 import { CATALOG_FILE_LIMIT, type CatalogFilter } from '../../shared/catalog.js';
-import { ApiError } from '../store.js';
+import { pacReferences } from '../pac-config.js';
+import { releaseRequestSecrets } from '../request-profiles.js';
+import type { RequestSecrets } from '../request-secrets.js';
+import { ApiError, type Store } from '../store.js';
 import { Catalog, type CatalogInput } from './database.js';
 import type { CatalogDeletion, CatalogDeletionResult, DeleteSourceReply } from './source-worker.js';
+import type { CatalogSecretReply, CatalogSecretRequest } from './worker.js';
 
 export class CatalogService {
   readonly db: Catalog;
@@ -21,7 +25,8 @@ export class CatalogService {
   private reconcileTask?: Promise<void>;
   private cleanupFailed = false;
 
-  constructor(private readonly database: string, private readonly reportError = console.error) {
+  constructor(private readonly database: string, private readonly reportError = console.error,
+    private readonly credentials?: { store: Store; secrets: RequestSecrets }) {
     this.database = resolve(database);
     this.directory = this.database + '.catalog';
     this.db = new Catalog(this.database);
@@ -78,12 +83,18 @@ export class CatalogService {
     }
   }
 
+  private async releasePacSecrets(refs: readonly string[]) {
+    if (this.credentials) await releaseRequestSecrets(this.credentials.store, this.credentials.secrets, refs);
+  }
+
   deleteSource(projectId: number, sourceId: number) {
     const error = this.writeBlock(projectId);
     if (error) return Promise.reject(error);
     return this.queueDeletion(async () => {
+      const refs = this.db.pacSecretReferences(projectId, sourceId);
       const { files } = await this.runDeletion(projectId, { sourceId });
       await this.cleanDeletedFiles(files);
+      await this.releasePacSecrets(refs);
     });
   }
 
@@ -93,6 +104,7 @@ export class CatalogService {
     this.clearing.add(projectId);
     return this.queueDeletion(async () => {
       try {
+        const refs = this.db.pacSecretReferences(projectId);
         // The transaction removes the jobs and their source versions together. After it commits no worker can add another batch.
         const { deleted, files } = await this.runDeletion(projectId, { confirmation });
         const active = this.active?.projectId === projectId ? this.active : undefined;
@@ -101,6 +113,7 @@ export class CatalogService {
         for (const upload of uploads) upload.stop.abort();
         await Promise.allSettled([active?.done, ...uploads.map(upload => upload.done)]);
         await this.cleanDeletedFiles(files);
+        await this.releasePacSecrets(refs);
         return { deleted };
       } finally {
         this.clearing.delete(projectId);
@@ -189,6 +202,7 @@ export class CatalogService {
     if (action === 'cancel') {
       this.uploads.get(id)?.stop.abort();
       if (!importing) await this.clean(id);
+      if (!importing) await this.releasePacSecrets(pacReferences(this.db.pacSnapshot(id)));
     }
     this.kick();
     return job;
@@ -236,11 +250,19 @@ export class CatalogService {
     if (id === undefined) return;
     const projectId = transfer?.projectId ?? this.db.importProject(id);
     if (projectId === undefined) return;
+    const refs = new Set(kind === 'import' ? pacReferences(this.db.pacSnapshot(id)) : []);
     const script = import.meta.url.endsWith('.ts') ? './worker.ts' : './worker.js';
     const worker = new Worker(new URL(script, import.meta.url), { workerData: {
       database: this.database, id, kind, projectId, file: kind === 'import' ? this.file(id) : undefined,
     } });
     worker.on('error', this.reportError);
+    worker.on('message', (request: CatalogSecretRequest) => {
+      if (request?.type !== 'pac-secret') return;
+      const value = refs.has(request.ref) ? this.credentials?.secrets.read(request.ref) : undefined;
+      void Promise.resolve(value).catch(() => undefined).then(secret => {
+        worker.postMessage({ type: 'pac-secret', id: request.id, value: secret } satisfies CatalogSecretReply);
+      }).catch(this.reportError);
+    });
     const done = new Promise<void>(resolve => {
       worker.once('exit', code => {
         void (async () => {
@@ -251,6 +273,7 @@ export class CatalogService {
             else if (state === 'queued' || state === 'running') this.db.workerFailed(id);
           }
           if (kind === 'cleanup' || (kind === 'import' && (state === 'done' || state === 'cancelled' || !state))) await this.clean(id);
+          if (refs.size) await this.releasePacSecrets([...refs]);
         })().catch(this.reportError).finally(() => {
           this.active = undefined;
           resolve();

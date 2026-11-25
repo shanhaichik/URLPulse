@@ -5,12 +5,15 @@ import { SaxesParser } from 'saxes';
 import { CATALOG_DOCUMENT_LIMIT, CATALOG_FILE_LIMIT, CATALOG_IMPORT_LIMIT } from '../../shared/catalog.js';
 import type { TlsProfile } from '../../shared/types.js';
 import { openSitemapStream } from '../checker.js';
+import { pacRequestOptions } from '../pac-config.js';
+import type { RequestSecrets } from '../request-secrets.js';
 import { type Catalog, type CatalogDocument, normalizeSitemapUrl, type SitemapEntry } from './database.js';
 
 interface ImportOptions {
   file?: string;
   signal?: AbortSignal;
   open?: (document: CatalogDocument, profile: TlsProfile, signal: AbortSignal) => Promise<Readable>;
+  readSecret?: RequestSecrets['read'];
   fileLimit?: number;
   importLimit?: number;
 }
@@ -146,6 +149,12 @@ export async function runImport(catalog: Catalog, id: number, options: ImportOpt
   let current: CatalogDocument | undefined;
   const stop = options.signal ?? new AbortController().signal;
   try {
+    const network = pacRequestOptions(catalog.pacSnapshot(id), options.readSecret);
+    const open = options.open ?? (async (doc, profile, signal) => {
+      if (!catalog.isLocal(doc)) return openSitemapStream(doc.location, profile, signal, network);
+      if (!options.file) throw new Error('Файл для импорта отсутствует.');
+      return createReadStream(options.file, { signal });
+    });
     while (catalog.state(id) === 'running') {
       stop.throwIfAborted();
       current = catalog.document(id);
@@ -158,11 +167,6 @@ export async function runImport(catalog: Catalog, id: number, options: ImportOpt
         (options.importLimit ?? CATALOG_IMPORT_LIMIT) - catalog.previousBytes(id));
       if (limit <= 0) throw new Error('Превышен лимит размера импорта.');
       const signal = AbortSignal.any([stop, AbortSignal.timeout(5 * 60_000)]);
-      const open = options.open ?? (async (doc, profile, signal) => {
-        if (!catalog.isLocal(doc)) return openSitemapStream(doc.location, profile, signal);
-        if (!options.file) throw new Error('Файл для импорта отсутствует.');
-        return createReadStream(options.file, { signal });
-      });
       const input = await open(current, catalog.profile(id), signal);
       try { await parseFile(catalog, id, current, input, signal, limit); }
       finally { input.destroy(); }
