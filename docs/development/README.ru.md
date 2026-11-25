@@ -81,7 +81,7 @@ npm run make:windows
 
 Публичные релизы содержат архивы исходников. Локальные установщики и артефакты CI используются для проверок. Дополнительный российский CA скачивается отдельно. [Релизы GitHub](https://github.com/shanhaichik/URLPulse/releases)
 
-При pull request, push в `main` или ручном запуске **Tests and coverage** собирает веб-версию и проверяет покрытие. **Desktop checks** запускает тесты, упаковку и smoke для macOS Apple Silicon, macOS Intel и Windows x64. Настольные задания запускают Vitest с двумя воркерами и лимитом 20 секунд на тест. Apple Silicon использует `macos-15`. [Tests and coverage](../../.github/workflows/tests.yml) · [Desktop checks](../../.github/workflows/desktop-build.yml)
+При pull request, push в `main` или ручном запуске **Tests and coverage** собирает веб-версию и проверяет покрытие. **Desktop checks** запускает тесты, упаковку и smoke для macOS Apple Silicon, macOS Intel и Windows x64. Настольные задания запускают Vitest с двумя воркерами и лимитом 20 секунд на тест. Apple Silicon использует `macos-15`. Для упаковки Windows задание скачивает официальный архив NSIS 3.13 и сверяет его SHA-256 с зафиксированным в workflow. [Tests and coverage](../../.github/workflows/tests.yml) · [Desktop checks](../../.github/workflows/desktop-build.yml)
 
 Для **Source release** дождитесь успешных проверок на результате слияния PR в `main`. Создайте аннотированный тег `vX.Y.Z`, соответствующий `package.json`. Запустите workflow из основной ветки с этим тегом и `publish: false`. После приёмки запустите тот же workflow с `publish: true`. Он проверит тег повторно и создаст GitHub Release с архивами исходников и автоматически собранными заметками. [Source release](../../.github/workflows/source-release.yml)
 
