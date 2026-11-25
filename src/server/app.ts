@@ -24,6 +24,8 @@ import { configurationFailure, parseRequestProfile, profileReferences, releaseRe
 import { envRequestSecrets, type RequestSecrets } from './request-secrets.js';
 import { ApiError, BATCH_LIMIT, PROJECT_URL_LIMIT, Store, type ExportScope } from './store.js';
 import { webAccess } from './web-access.js';
+import { isLocale, parseLocale } from '../shared/i18n/index.js';
+import { diagnosticReference, translateDiagnostic } from '../shared/i18n/diagnostics.js';
 
 interface AppOptions {
   database?: string;
@@ -187,10 +189,11 @@ export function createApp(options: AppOptions = {}) {
   function sendExport(reply: FastifyReply, projectId: number, query: Record<string, unknown>,
     scope: ExportScope = {}) {
     const kind = exportFormat(query.format ?? 'csv');
+    const locale = kind === 'excel' && isLocale(query.locale) ? query.locale : undefined;
     const filters = parseReportFilters(query);
-    return sendDownload(reply, reportFile(store.project(projectId).name, kind).name,
+    return sendDownload(reply, reportFile(store.project(projectId).name, kind, undefined, locale).name,
       kind === 'json' ? 'application/json; charset=utf-8' : 'text/csv; charset=utf-8',
-      () => openReportStream(store, projectId, scope, filters, kind, options.tasks));
+      () => openReportStream(store, projectId, scope, filters, kind, options.tasks, locale));
   }
   const origin = options.origin ?? 'http://127.0.0.1:8731';
   const hosts = [new URL(origin).host, new URL(origin.replace('127.0.0.1', 'localhost')).host];
@@ -213,14 +216,21 @@ export function createApp(options: AppOptions = {}) {
     }
   });
 
-  app.setErrorHandler((error, _request, reply) => {
-    if (databaseBusy(error)) return reply.code(503).send({ error: 'База занята. Повторите действие через несколько секунд.' });
-    if (error instanceof ApiError) return reply.code(error.statusCode).send({ error: error.message });
+  app.setErrorHandler((error, request, reply) => {
+    const requested = request.query as { format?: unknown; locale?: unknown } | undefined;
+    const structured = request.headers['x-urlpulse-i18n'] === '1';
+    const localizedDownload = !structured && requested?.format === 'excel' && request.routeOptions.url?.endsWith('/export');
+    const sendError = (status: number, message: string) => reply.code(status).send({
+      error: localizedDownload ? translateDiagnostic(message, parseLocale(requested.locale)) : message,
+      ...(structured ? diagnosticReference(message) : undefined),
+    });
+    if (databaseBusy(error)) return sendError(503, 'База занята. Повторите действие через несколько секунд.');
+    if (error instanceof ApiError) return sendError(error.statusCode, error.message);
     const status = (error as { statusCode?: number }).statusCode;
-    if (status && status < 500) return reply.code(status).send({ error: status === 413
-      ? 'Превышен допустимый размер запроса.' : 'Некорректный запрос.' });
+    if (status && status < 500) return sendError(status, status === 413
+      ? 'Превышен допустимый размер запроса.' : 'Некорректный запрос.');
     app.log.error(error);
-    return reply.code(500).send({ error: 'Внутренняя ошибка приложения.' });
+    return sendError(500, 'Внутренняя ошибка приложения.');
   });
   if (!options.store) app.addHook('onClose', async () => store.close());
   if (access) app.post('/api/session', async (request, reply) => {
@@ -503,9 +513,10 @@ export function createApp(options: AppOptions = {}) {
       const projectId = id(params.projectId);
       const input = parseComparisonInput(query);
       const format = exportFormat(query.format ?? 'csv');
-      return sendDownload(reply, reportFile(store.project(projectId).name, format).name,
+      const locale = parseLocale(format === 'excel' ? query.locale : undefined);
+      return sendDownload(reply, reportFile(store.project(projectId).name, format, undefined, locale).name,
         format === 'json' ? 'application/json; charset=utf-8' : 'text/csv; charset=utf-8',
-        () => openComparisonStream(store, projectId, input, format, options.tasks));
+        () => openComparisonStream(store, projectId, input, format, options.tasks, locale));
     });
     projects.post<{ Params: ProjectParams }>('/runs', async (request, reply) => {
       const input = object(request.body);

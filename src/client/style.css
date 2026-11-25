@@ -127,6 +127,7 @@ input[type=checkbox] { accent-color: var(--violet); width: 16px; height: 16px; m
 .filter-select { position: relative; display: inline-grid; min-width: 0; max-width: 100%; }
 .status-filter { appearance: none; width: 100%; min-width: 0; min-height: 38px; padding: 7px 9px; padding-inline-end: 32px; border: 1px solid var(--control-line); border-radius: 9px; color: var(--ink); background: white; text-overflow: ellipsis; }
 .filter-select-arrow { position: absolute; inset-inline-end: 11px; top: 50%; transform: translateY(-50%); color: var(--ink); pointer-events: none; }
+.language-select { display: grid; gap: 6px; max-width: 140px; }
 @media (forced-colors: active) {
   .status-filter { appearance: auto; padding-inline-end: 9px; }
   .filter-select-arrow { display: none; }
@@ -247,6 +248,7 @@ input[type=checkbox] { accent-color: var(--violet); width: 16px; height: 16px; m
 .modal.wide { width: min(calc(100% - 28px), 920px); }
 .modal::backdrop { background: #14162c76; }
 .modal-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 18px 21px; border-bottom: 1px solid var(--line); }
+.modal-header-controls { display: flex; align-items: flex-start; gap: 8px; flex-shrink: 0; }
 .modal-header-main { min-width: 0; overflow-wrap: anywhere; }
 .modal-header-main > div { min-width: 0; }
 .modal-header-sticky { position: sticky; top: 0; z-index: 1; background: #fff; }
@@ -394,6 +396,7 @@ input[type=checkbox] { accent-color: var(--violet); width: 16px; height: 16px; m
   .project-nav button { flex-shrink: 0; min-height: 32px; padding: 6px 8px; max-width: 160px; font-size: 12px; }
   .topbar { min-height: 50px; padding: 5px 13px; }
   .main { padding: 19px 12px 30px; }
+  .page-actions { flex-wrap: wrap; }
   .notifications-toggle > span:not(.notification-count) { display: none; }
   .project-mark { width: 41px; height: 41px; }
   .tabs { gap: 12px; margin-bottom: 15px; }

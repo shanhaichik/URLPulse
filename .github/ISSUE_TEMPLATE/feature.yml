@@ -1,25 +1,28 @@
-name: Feature request
-description: Suggest an improvement to a URLPulse workflow.
+name: Feature request / Предложение
+description: Suggest a workflow improvement. Предложите улучшение рабочего сценария.
 body:
   - type: markdown
     attributes:
-      value: Use synthetic examples and redact private URLs, credentials, and personal data from any attachments.
+      value: |
+        Use synthetic examples and remove private URLs, credentials, and personal data from attachments.
+
+        Используйте синтетические примеры. Удалите из вложений приватные URL, секреты и личные данные.
   - type: textarea
     id: workflow
     attributes:
-      label: Workflow and problem
-      description: Describe what you are trying to do and where the current workflow gets in the way.
+      label: Workflow and problem / Сценарий и проблема
+      description: Describe your goal and where the current workflow gets in the way. Опишите цель и место, где возникает трудность.
     validations:
       required: true
   - type: textarea
     id: outcome
     attributes:
-      label: Desired outcome
-      description: Describe what you would like to be able to do.
+      label: Desired outcome / Желаемый результат
+      description: Describe what you want to accomplish. Опишите, что хотите сделать в приложении.
     validations:
       required: true
   - type: textarea
     id: workarounds
     attributes:
-      label: Current workaround
-      description: Share any approach you already use and its limitations.
+      label: Current workaround / Текущий способ
+      description: Share your current approach and its limits. Опишите, как решаете задачу сейчас и где возникают ограничения.

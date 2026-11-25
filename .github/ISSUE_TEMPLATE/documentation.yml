@@ -1,22 +1,22 @@
-name: Documentation issue
-description: Report missing, unclear, or outdated URLPulse documentation.
+name: Documentation issue / Документация
+description: Report missing, unclear, or outdated docs. Сообщите, чего не хватает или что нужно уточнить.
 body:
   - type: input
     id: location
     attributes:
-      label: Page or section
-      description: Share the repository path or a link to the relevant section.
+      label: Page or section / Страница или раздел
+      description: Include the documentation language and a path or link. Укажите язык документации и путь или ссылку.
     validations:
       required: true
   - type: textarea
     id: problem
     attributes:
-      label: What needs to change?
-      description: Describe what you were trying to do and what is missing, unclear, or outdated.
+      label: What needs to change? / Что нужно изменить?
+      description: Describe the task and what is missing, unclear, or outdated. Опишите задачу и что оказалось непонятно, устарело или отсутствует.
     validations:
       required: true
   - type: textarea
     id: suggestion
     attributes:
-      label: Suggested correction
-      description: Include the app version, command, or wording if you have checked a correction. Keep private URLs and credentials out of examples.
+      label: Suggested correction / Предлагаемая правка
+      description: Include the version and any verified command or wording. Укажите версию и проверенную команду или формулировку.

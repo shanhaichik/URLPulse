@@ -2,7 +2,8 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, expect, test, vi } from 'vitest';
-import { desktopPreferences } from '../src/desktop/preferences.js';
+import { desktopPreferences, readDesktopLocale } from '../src/desktop/preferences.js';
+import type { SendEmail } from '../src/server/worker.js';
 import type { SaveDesktopPreferences } from '../src/shared/desktop.js';
 
 const os = vi.hoisted(() => ({ login: false, rejectLogin: false, ignoreLogin: false }));
@@ -11,7 +12,9 @@ const storage = vi.hoisted(() => ({
   encryptStringAsync: vi.fn<(value: string) => Promise<Buffer>>(),
   decryptStringAsync: vi.fn<(value: Buffer) => Promise<{ result: string }>>(),
 }));
+const sendMail = vi.hoisted(() => vi.fn(async (_message: object) => {}));
 
+vi.mock('nodemailer', () => ({ default: { createTransport: () => ({ sendMail }) } }));
 vi.mock('electron', () => ({
   app: {
     getLoginItemSettings: () => ({ openAtLogin: os.login }),
@@ -35,6 +38,7 @@ beforeEach(() => {
   storage.isAsyncEncryptionAvailable.mockReset().mockResolvedValue(false);
   storage.encryptStringAsync.mockReset();
   storage.decryptStringAsync.mockReset().mockRejectedValue(new Error('Key unavailable'));
+  sendMail.mockClear();
 });
 
 test('persists paused schedules while encrypted SMTP settings are unavailable', async () => {
@@ -147,5 +151,79 @@ test('verifies the resulting login registration even when the OS ignores the req
     expect(saved.preferences.openAtLogin).toBe(true);
     expect(saved.loginError).toBeUndefined();
     expect(await readdir(directory)).toEqual([]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('persists the interface locale alongside concurrent background and email preference changes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pulse-preferences-'));
+  const path = join(directory, 'desktop-preferences.json');
+  const ciphertext = Buffer.from('locked SMTP ciphertext').toString('base64');
+  try {
+    await writeFile(path, JSON.stringify({ schedulesEnabled: true, smtp: ciphertext, locale: 'invalid' }));
+    const current = await desktopPreferences(directory);
+    expect(current.getLocale()).toBe('ru-RU');
+    expect(current.get().emailLocale).toBe('ru-RU');
+    await Promise.all([
+      current.setLocale('en-US'),
+      current.save({ section: 'background', schedulesEnabled: false, openAtLogin: null }),
+    ]);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ schedulesEnabled: false, smtp: ciphertext, locale: 'en-US' });
+    expect(storage.decryptStringAsync).toHaveBeenCalledTimes(1);
+    expect(storage.encryptStringAsync).not.toHaveBeenCalled();
+    await expect(current.setLocale('en' as 'en-US')).rejects.toThrow('Choose Russian or English.');
+    expect(current.getLocale()).toBe('en-US');
+
+    const restarted = await desktopPreferences(directory);
+    expect(restarted.getLocale()).toBe('en-US');
+    expect(restarted.schedulesEnabled()).toBe(false);
+    expect(restarted.get()).toMatchObject({ emailLocale: 'ru-RU', smtp: { state: 'unavailable' } });
+    await restarted.save({ section: 'smtp', smtp: null, emailLocale: 'en-US' });
+    await restarted.setLocale('ru-RU');
+    const nextRestart = await desktopPreferences(directory);
+    expect(nextRestart.getLocale()).toBe('ru-RU');
+    expect(nextRestart.get()).toMatchObject({ emailLocale: 'en-US', smtp: { state: 'empty' } });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('saves the email language independently when SMTP credentials are locked', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pulse-preferences-'));
+  const path = join(directory, 'desktop-preferences.json');
+  const ciphertext = Buffer.from('locked SMTP ciphertext').toString('base64');
+  try {
+    await writeFile(path, JSON.stringify({ schedulesEnabled: false, smtp: ciphertext, locale: 'en-US' }));
+    expect(await readDesktopLocale(directory)).toBe('en-US');
+    expect(storage.decryptStringAsync).not.toHaveBeenCalled();
+    const current = await desktopPreferences(directory);
+    await expect(current.save({ section: 'email-language', emailLocale: 'en-US' })).resolves.toMatchObject({
+      preferences: { emailLocale: 'en-US', smtp: { state: 'unavailable' } },
+    });
+    expect(JSON.parse(await readFile(path, 'utf8')))
+      .toEqual({ schedulesEnabled: false, smtp: ciphertext, locale: 'en-US', emailLocale: 'en-US' });
+    expect(storage.decryptStringAsync).toHaveBeenCalledTimes(1);
+    expect(storage.isAsyncEncryptionAvailable).not.toHaveBeenCalled();
+    expect(storage.encryptStringAsync).not.toHaveBeenCalled();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a configured desktop sender uses the current email language without recreating the SMTP preferences', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pulse-preferences-'));
+  const job = { email: 'receiver@fixture.invalid', messageId: '<locale@fixture.invalid>', projectName: 'Fixture',
+    projectId: 1, runId: 2, available: 3, failures: 1, total: 4 } as Parameters<SendEmail>[0];
+  storage.isAsyncEncryptionAvailable.mockResolvedValue(true);
+  storage.encryptStringAsync.mockResolvedValue(Buffer.from('fixture ciphertext'));
+  try {
+    const current = await desktopPreferences(directory);
+    await current.save({ section: 'smtp', smtp: credentials });
+    const send = current.getSender()!;
+    await current.setLocale('en-US');
+    await send(job);
+    expect(sendMail).toHaveBeenLastCalledWith(expect.objectContaining({ subject: 'Пульс URL · Fixture' }));
+    await current.save({ section: 'email-language', emailLocale: 'en-US' });
+    expect(current.getSender()).toBe(send);
+    await send(job);
+    expect(sendMail).toHaveBeenLastCalledWith(expect.objectContaining({
+      messageId: job.messageId, text: expect.stringContaining('Available: 3 of 4.'),
+    }));
+    expect(storage.encryptStringAsync).toHaveBeenCalledTimes(1);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

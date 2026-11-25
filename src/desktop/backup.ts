@@ -2,7 +2,9 @@ import { realpath, rename, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { Worker } from 'node:worker_threads';
-import { BACKUP_RUN_INTEGRITY_PREFIX, type BackupPhase } from '../shared/desktop.js';
+import type { BackupPhase } from '../shared/desktop.js';
+import { defaultLocale, type AppLocale } from '../shared/i18n/index.js';
+import { nativeTranslator } from '../shared/i18n/locales/native.js';
 import { catalogTables } from '../server/catalog/schema.js';
 import { ownerSuffix } from '../server/database-owner.js';
 import { parsePacFile } from '../server/pac-config.js';
@@ -26,7 +28,7 @@ export async function copyDatabase(source: string, destination: string) {
   } finally { db.close(); }
 }
 
-export async function assertSeparateFile(source: string, destination: string) {
+export async function assertSeparateFile(source: string, destination: string, locale: AppLocale = defaultLocale) {
   const actualSource = await realpath(source);
   const actualDestination = await realpath(destination).catch(async error => {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -39,7 +41,7 @@ export async function assertSeparateFile(source: string, destination: string) {
   });
   if (['', '-wal', '-shm', '-journal', ownerSuffix].some(suffix => actualSource + suffix === actualDestination)
     || (right?.ino && left.ino === right.ino && left.dev === right.dev)) {
-    throw new Error('Выберите файл, отличный от активной базы.');
+    throw new Error(nativeTranslator(locale)('selectSeparateDatabase'));
   }
 }
 
@@ -122,8 +124,8 @@ async function validateRequestProfiles(db: DatabaseSync) {
 }
 
 export class BackupRunIntegrityError extends Error {
-  constructor(readonly runId: number) {
-    super(`${BACKUP_RUN_INTEGRITY_PREFIX}${runId}.`);
+  constructor(readonly runId: number, locale: AppLocale = defaultLocale) {
+    super(nativeTranslator(locale)('backupRunIntegrity', { runId }));
   }
 }
 
@@ -215,7 +217,8 @@ function validatePacVersions(db: DatabaseSync) {
   }
 }
 
-export async function prepareImport(source: string, parent: string, progress?: (phase: BackupPhase) => void, journal?: StagingJournal) {
+export async function prepareImport(source: string, parent: string, progress?: (phase: BackupPhase) => void,
+  journal?: StagingJournal, locale: AppLocale = defaultLocale) {
   const { file, dispose } = await stageFile(parent, 'import', journal);
   try {
     await new Promise<void>((resolve, reject) => {
@@ -226,7 +229,7 @@ export async function prepareImport(source: string, parent: string, progress?: (
       let failure: Error | undefined;
       worker.on('message', (message: BackupPhase | { inconsistentRunId: number }) => {
         if (typeof message === 'string') progress?.(message);
-        else failure = new BackupRunIntegrityError(message.inconsistentRunId);
+        else failure = new BackupRunIntegrityError(message.inconsistentRunId, locale);
       });
       worker.once('error', error => { failure = error; });
       worker.once('exit', code => {
@@ -239,6 +242,6 @@ export async function prepareImport(source: string, parent: string, progress?: (
   } catch (cause) {
     await dispose().catch(console.error);
     if (cause instanceof BackupRunIntegrityError) throw cause;
-    throw new Error('Не удалось восстановить базу Пульса URL из выбранного файла.', { cause });
+    throw new Error(nativeTranslator(locale)('backupImportFailed'), { cause });
   }
 }

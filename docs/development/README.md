@@ -1,6 +1,8 @@
 # Developing URLPulse
 
-URLPulse has a Russian-language interface in both browser and Electron builds. See [Architecture and contracts](architecture.md) for the request paths, SQLite model, and desktop bridge. See [Contributing](../../CONTRIBUTING.md) for the contribution workflow.
+[Русский](README.ru.md) · [Documentation index](../README.md)
+
+The browser and Electron interfaces support Russian and English. See [Architecture and contracts](architecture.md) for the SQLite model, HTTP API, and desktop bridge, and the [translation guide](../localization/TRANSLATION_GUIDE.en.md) for catalog changes and tests. [Contributing](../../CONTRIBUTING.md)
 
 ## Set up and run
 
@@ -23,9 +25,9 @@ npm run desktop   # Rebuilds and launches Electron
 
 ### Local configuration
 
-The web scripts read `.env` when it exists. Copy [`.env.example`](../../.env.example) for optional settings. `URL_PULSE_DB` overrides the default `data/pulse.sqlite3`. `PULSE_WEB_ACCESS_KEY` accepts a random 32–128-character base64url value for a stable access key. Session credentials are still regenerated on restart. `SMTP_*` configures web email delivery, and `PULSE_REQUEST_SECRET_*` supplies HTTP profile secrets by name.
+The web scripts read `.env` when it exists. Copy [`.env.example`](../../.env.example) for optional settings. `URL_PULSE_DB` overrides the default `data/pulse.sqlite3`. `PULSE_WEB_ACCESS_KEY` accepts a random 32–128-character base64url value for a stable access key. Session credentials are still regenerated on restart. `SMTP_*` configures web email delivery, `PULSE_EMAIL_LOCALE` sets the email language for all projects (`ru-RU` by default, with `en-US` also available), and `PULSE_REQUEST_SECRET_*` supplies HTTP profile secrets by name.
 
-Electron stores `pulse.sqlite3` in its per-user profile. To use a separate desktop profile, set `PULSE_DESKTOP_DATA_DIR` in the launch environment. Configure desktop SMTP and background behavior in **Настройки приложения**. Use separate databases for concurrent web and Electron processes. Custom data directories should belong to the current user and have mode `0700` on POSIX or private ACLs on Windows. Keep local settings, credentials, and databases out of commits.
+Electron stores `pulse.sqlite3` in its per-user profile. To use a separate desktop profile, set `PULSE_DESKTOP_DATA_DIR` in the launch environment. Configure SMTP and background behavior in **Application settings**. Its SMTP section saves the email language independently of credentials. Use separate databases for concurrent web and Electron processes. Custom data directories should belong to the current user and have mode `0700` on POSIX or private ACLs on Windows. Keep local settings, credentials, and databases out of commits.
 
 The standard TLS profile works with the runtime trust roots. For the optional `russian-ca` profile, obtain `Russian_Trusted_Root_CA.cer` separately. Use the checkout’s `cert/` folder for web, the profile’s `cert/` folder for Electron, or set `PULSE_RUSSIAN_CA_FILE` to an absolute path. Restart the process after changing the file. URLPulse validates the pinned fingerprint, CA status, self-signature, and validity dates before adding the CA to trust for that project’s HTTPS checks and remote sitemaps. [`tls-profile.ts`](../../src/server/tls-profile.ts)
 
@@ -37,7 +39,7 @@ The standard TLS profile works with the runtime trust roots. For the optional `r
 | Debug Fastify | Stop the existing API process, then run `node --inspect --env-file-if-exists=.env --import tsx src/server/main.ts --dev`. Start the Vite process separately with `npm run dev:web` if needed. |
 | Port already in use | Stop the process on 5173 or 8731 for development, or 8732 for the Playwright fixture server. |
 | Browser API returns 401 | Open the current terminal access link using its printed loopback origin. |
-| SQLite already open | Stop the owner with Ctrl+C or the Electron **Выход** action. Closing the Electron window leaves it in the tray. Leave the `.owner-lock` file in place. |
+| SQLite already open | Stop the owner with Ctrl+C or the Electron **Quit** action. Closing the Electron window leaves it in the tray. Leave the `.owner-lock` file in place. |
 | `ERR_TLS_PROFILE_CA` | Check the configured file path and pinned certificate. Use the default project TLS profile when the additional CA is unnecessary. |
 
 Use `npm run typecheck` for automated static checking. The repository currently has no lint or formatter script. Match the surrounding TypeScript and CSS style and keep formatting changes scoped to the lines you edit. [`package.json`](../../package.json)
@@ -50,10 +52,11 @@ Use `npm run typecheck` for automated static checking. The repository currently 
 | `npx playwright install chromium` | Installs Chromium for the browser tests and coverage. |
 | `npm run test:e2e` | Builds the app and runs Playwright specs under `e2e/` against a fixture server on port 8732. |
 | `npm run test:desktop` | Builds and runs the Electron smoke scenario with a temporary profile. Run this from a desktop session. |
+| `node e2e/desktop-locale-smoke.mjs` | Checks Electron language selection, native captions, restart, and IPC after `npm run build`. |
 | `npm run test:coverage` | V8 coverage for server, desktop, and shared TypeScript. Reports go to `coverage/node/`. Full-run thresholds are 80% lines and 75% branches. |
 | `npm run test:coverage:browser` | Playwright coverage for instrumented React code. Reports go to `coverage/browser/`. Full-run thresholds are 84% lines and 79% branches. |
 
-Use `npm test -- tests/http-contracts.test.ts` for a focused contract check or `npx playwright test e2e/run-workflow.spec.ts` after building the app. `PULSE_E2E_BROWSER_CHANNEL=chrome` uses an installed Chrome. `PULSE_SMOKE_EXECUTABLE` can point the desktop smoke to the installed application executable, and `PULSE_DESKTOP_SKIP_PROTOCOL_REGISTRATION=1` skips OS registration for isolated Windows test profiles. [Coverage audit](../audits/2026-11-23/TEST_COVERAGE.md)
+Use `npm test -- tests/http-contracts.test.ts` for a focused contract check or `npx playwright test e2e/run-workflow.spec.ts` after building the app. `PULSE_E2E_BROWSER_CHANNEL=chrome` uses an installed Chrome. Set `PULSE_SMOKE_EXECUTABLE` to smoke-test a packaged executable. The smoke scripts use temporary profiles and skip report protocol registration. [Localization test report](../localization/TEST_REPORT.en.md) · [Historical coverage audit in Russian](../audits/2026-11-23/TEST_COVERAGE.md)
 
 For a regression test, exercise the closest caller that can reproduce the failure. Use `createApp()` with Fastify injection for HTTP contracts and temporary SQLite files for persistence and concurrency behavior. Follow the fixture server and desktop smoke patterns for controlled checks, sitemap responses, and test profiles. Use synthetic data, stub external responses, and close the stores, workers, and fixture servers before removing temporary files. [`e2e/server.ts`](../../e2e/server.ts) · [`e2e/desktop-smoke.mjs`](../../e2e/desktop-smoke.mjs)
 
@@ -74,9 +77,9 @@ The default outputs are `out/make/dmg/<arch>/Pulse URL-<version>-<arch>.dmg` and
 
 ## Release preparation
 
-For a source release, check that `package.json`, `package-lock.json`, and [CHANGELOG.md](../../CHANGELOG.md) agree. Review the exact source tree for generated files and local data, validate it with the tests above, and point the version tag (`vX.Y.Z`) at the approved release commit. Link the changes and validation limits in the release notes.
+Synchronize the version in `package.json`, `package-lock.json`, and the two changelogs once the release version is agreed. Review the exact source tree for generated files and local data. Use the tests above and the checklist before tagging the approved commit. [English changelog](../../CHANGELOG.en.md) · [Russian changelog](../../CHANGELOG.md) · [Source release checklist](release-checklist.md)
 
-**1.5.0 was published as a source-only release.** The pinned CA is obtained separately. Local, unsigned packaging produced all three installer targets and the full Apple Silicon packaged smoke passed. Native Windows installer checks were explicitly waived for that release. The Intel package passed the targeted CA check under Rosetta. The full Intel smoke under Rosetta timed out at the PAC step twice.
+Public releases provide source archives. Local installers and desktop CI artifacts serve for testing. The pinned CA is obtained separately. [GitHub Releases](https://github.com/shanhaichik/URLPulse/releases)
 
 On pull requests, pushes to `main`, and manual dispatch, [Tests and coverage](../../.github/workflows/tests.yml) builds the production web app, type-checks it, and measures test coverage. [Desktop checks](../../.github/workflows/desktop-build.yml) runs unit tests, builds installers, and smoke-tests the three desktop targets. Desktop runners limit Vitest to two workers and give each test up to 20 seconds. The Apple Silicon job uses `macos-26`. Desktop outputs are CI test artifacts.
 

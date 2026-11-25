@@ -1,42 +1,52 @@
-name: Bug report
-description: Report a problem you encountered while using URLPulse.
+name: Bug report / Ошибка
+description: Report a problem with URLPulse. Сообщите об ошибке в Пульсе URL.
 body:
   - type: markdown
     attributes:
       value: |
         Use synthetic URLs and projects. Remove credentials, access links, private hosts, SMTP settings, and personal data from logs, exports, and screenshots. For vulnerabilities, see the [security policy](https://github.com/shanhaichik/URLPulse/security/policy).
+
+        Используйте синтетические URL и проекты. Удалите из логов, выгрузок и скриншотов секреты, ссылки доступа, приватные адреса, параметры SMTP и личные данные. Для уязвимостей используйте [политику безопасности](https://github.com/shanhaichik/URLPulse/security/policy).
   - type: input
     id: version
     attributes:
-      label: URLPulse version
-      placeholder: "Example: 1.5.0"
+      label: URLPulse version / Версия Пульса URL
+      placeholder: "1.5.1"
     validations:
       required: true
   - type: input
     id: platform
     attributes:
-      label: Operating system and run mode
-      description: Include the OS version, CPU architecture, and whether you used Electron or the browser. For the browser, include its name and version.
-      placeholder: "Example: macOS 15, arm64, Electron"
+      label: Operating system and run mode / ОС и режим запуска
+      description: Include OS version, CPU architecture, and Electron or browser details. Укажите версию ОС, архитектуру и режим запуска. Для браузера укажите название и версию.
+      placeholder: "macOS 15, arm64, Electron"
     validations:
       required: true
+  - type: dropdown
+    id: locale
+    attributes:
+      label: Interface language / Язык интерфейса
+      options:
+        - English (en-US)
+        - Русский (ru-RU)
+        - Both / Оба
   - type: textarea
     id: steps
     attributes:
-      label: Steps to reproduce
-      description: Describe the setup and the shortest sequence that reproduces the problem.
+      label: Steps to reproduce / Шаги воспроизведения
+      description: Describe the setup and shortest sequence. Опишите настройки и краткую последовательность действий.
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: Expected result
+      label: Expected result / Ожидаемый результат
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: Actual result
-      description: Include any relevant, redacted error messages or screenshots.
+      label: Actual result / Фактический результат
+      description: Include redacted errors or screenshots. Приложите текст ошибки или скриншот без приватных данных.
     validations:
       required: true

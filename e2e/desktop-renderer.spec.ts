@@ -1,12 +1,12 @@
 import type { DesktopPreferences } from '../src/shared/desktop.js';
 import { expect, test, type Page } from './fixtures.js';
 
-async function launchDesktopRenderer(page: Page, smtpState: DesktopPreferences['smtp']['state']) {
-  await page.addInitScript(state => {
+async function launchDesktopRenderer(page: Page, smtpState: DesktopPreferences['smtp']['state'], blockLoginChange = false) {
+  await page.addInitScript(({ state, blockLoginChange }) => {
     const defaultSmtp = {
       host: '', port: 587, tlsMode: 'starttls' as const, user: '', from: '', hasPassword: false, state,
     };
-    let preferences: DesktopPreferences = { openAtLogin: null, schedulesEnabled: true, smtp: defaultSmtp };
+    let preferences: DesktopPreferences = { openAtLogin: blockLoginChange ? false : null, schedulesEnabled: true, smtp: defaultSmtp };
     let imports = 0;
     window.pulseDesktop = {
       async request({ path, method, body }) {
@@ -30,6 +30,11 @@ async function launchDesktopRenderer(page: Page, smtpState: DesktopPreferences['
       async savePreferences(input) {
         if (input.section === 'background') {
           preferences = { ...preferences, schedulesEnabled: input.schedulesEnabled };
+          if (blockLoginChange && input.openAtLogin !== null) {
+            return { preferences, loginError: 'Не удалось изменить автозапуск. Проверьте параметры автозапуска системы и повторите попытку.' };
+          }
+        } else if (input.section === 'email-language') {
+          preferences = { ...preferences, emailLocale: input.emailLocale };
         } else {
           const smtp = input.smtp;
           preferences = { ...preferences, smtp: smtp
@@ -40,11 +45,23 @@ async function launchDesktopRenderer(page: Page, smtpState: DesktopPreferences['
         return { preferences };
       },
     };
-  }, smtpState);
+  }, { state: smtpState, blockLoginChange });
   await page.goto('/');
   await page.getByRole('banner').getByRole('button', { name: 'Настройки приложения' }).click();
   return page.getByRole('dialog', { name: 'Настройки приложения' });
 }
+
+test('keeps an existing startup error readable after switching languages', async ({ page }) => {
+  await launchDesktopRenderer(page, 'empty', true);
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Запускать приложение при входе в систему').check();
+  await dialog.getByRole('button', { name: 'Сохранить фоновую работу' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Не удалось изменить автозапуск.');
+
+  await dialog.getByLabel('Язык', { exact: true }).selectOption('en-US');
+  await expect(dialog.getByRole('alert')).toContainText('Could not change startup behavior.');
+  await expect(dialog.getByLabel('Open app at login')).not.toBeChecked();
+});
 
 test('persists SMTP form state through the bridge and does not refill a saved password', async ({ page }) => {
   const dialog = await launchDesktopRenderer(page, 'empty');
@@ -56,8 +73,15 @@ test('persists SMTP form state through the bridge and does not refill a saved pa
   await dialog.getByLabel('Имя пользователя').fill('operator');
   const password = dialog.getByLabel('Пароль SMTP');
   await password.fill('fixture-password');
+  const emailLanguage = dialog.getByLabel('Язык писем');
+  await expect(emailLanguage).toHaveValue('ru-RU');
+  await emailLanguage.selectOption('en-US');
+  await dialog.getByRole('button', { name: 'Сохранить язык писем' }).click();
+  await expect(dialog.getByText('Язык писем сохранён.')).toBeVisible();
+  await expect(password).toHaveValue('fixture-password');
   await dialog.getByRole('button', { name: 'Сохранить SMTP' }).click();
   await expect(dialog.getByText('Настройки SMTP сохранены.')).toBeVisible();
+  await expect(emailLanguage).toHaveValue('en-US');
   await expect(password).toHaveValue('');
   await expect(password).toHaveAttribute('placeholder', /Сохранён/);
   const reset = dialog.getByRole('button', { name: 'Удалить настройки SMTP' });
@@ -68,6 +92,16 @@ test('persists SMTP form state through the bridge and does not refill a saved pa
   await reset.click();
   await expect(dialog.getByText('Настройки SMTP удалены.')).toBeVisible();
   await expect(dialog.getByLabel('SMTP-хост')).toHaveValue('');
+  await expect(emailLanguage).toHaveValue('en-US');
+});
+
+test('saves email language while the stored SMTP settings are unavailable', async ({ page }) => {
+  const dialog = await launchDesktopRenderer(page, 'unavailable');
+  await dialog.getByLabel('Язык писем').selectOption('en-US');
+  await dialog.getByRole('button', { name: 'Сохранить язык писем' }).click();
+  await expect(dialog.getByText('Язык писем сохранён.')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Сохранить язык писем' })).toBeDisabled();
+  await expect(dialog.getByText(/Сохранённые параметры SMTP недоступны/)).toBeVisible();
 });
 
 test('distinguishes failed, cancelled and completed restore while SMTP is unavailable', async ({ page }) => {

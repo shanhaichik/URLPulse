@@ -1,4 +1,6 @@
 import type { DesktopRequest } from '../shared/desktop.js';
+import { defaultLocale, type AppLocale } from '../shared/i18n/index.js';
+import { nativeTranslator } from '../shared/i18n/locales/native.js';
 
 const validRoutes: Record<Exclude<DesktopRequest['method'], 'PUT'>, RegExp> = {
   GET: /^\/api\/(?:notifications|projects(?:\/\d+(?:\/(?:urls(?:\/(?:\d+|page|selection|delete\/all))?|runs(?:\/\d+)?|groups(?:\/\d+\/runs)?|catalog(?:\/(?:page|imports\/history|clear))?))?)?)$/,
@@ -30,20 +32,23 @@ function validRoute(method: DesktopRequest['method'], path: string) {
   return match?.slice(1).every(value => value === undefined || numberId(value));
 }
 
-export function desktopRequest(input: DesktopRequest): DesktopRequest {
+export function desktopRequest(input: DesktopRequest, locale: AppLocale = defaultLocale): DesktopRequest {
   if (!input || (input.method !== 'PUT' && !Object.hasOwn(validRoutes, input.method))
     || typeof input.path !== 'string' || input.path.length > 14_000
     || /[#\\\u0000-\u001f]/.test(input.path)
     || !validRoute(input.method, input.path)
+    || (input.i18n !== undefined && input.i18n !== true)
     || (input.body !== undefined && (typeof input.body !== 'string' || Buffer.byteLength(input.body) > 12_010_000))) {
-    throw new Error('Недопустимая операция приложения.');
+    throw new Error(nativeTranslator(locale)('invalidDesktopOperation'));
   }
-  return { path: input.path, method: input.method, body: input.body };
+  return { path: input.path, method: input.method, body: input.body, ...(input.i18n && { i18n: true }) };
 }
 
-export function exportScope(path: string) {
+export function exportScope(path: string, locale: AppLocale = defaultLocale) {
   const match = typeof path === 'string' && /^\/api\/projects\/(\d+)(?:\/(urls|runs|groups)\/(\d+))?$/.exec(path);
-  if (!match || !numberId(match[1]) || (match[2] && !numberId(match[3]))) throw new Error('Недопустимый адрес отчёта.');
+  if (!match || !numberId(match[1]) || (match[2] && !numberId(match[3]))) {
+    throw new Error(nativeTranslator(locale)('invalidReportAddress'));
+  }
   const projectId = Number(match[1]);
   if (match[2] === 'urls') return { projectId, urlId: Number(match[3]) };
   if (match[2] === 'runs') return { projectId, runId: Number(match[3]) };

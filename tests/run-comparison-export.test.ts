@@ -4,7 +4,7 @@ import { expect, test, vi } from 'vitest';
 import { openComparisonStream } from '../src/server/run-comparison-export.js';
 import { Store } from '../src/server/store.js';
 
-function fixture() {
+function fixture(failure = 'HTTP 503') {
   let now = Date.parse('2026-01-01T12:00:00.000Z');
   const store = new Store(':memory:', () => now);
   const { id: projectId } = store.createProject('Сравнение экспорта', '');
@@ -17,7 +17,7 @@ function fixture() {
       store.saveResult(item.id, {
         status: regression ? 'error' : 'ok', httpCode: regression ? 503 : 200, finalUrl: item.url,
         durationMs: regression ? 440 : 120, redirects: 0, errorKind: regression ? 'http' : null,
-        error: regression ? 'HTTP 503' : null, contentType: 'text/html', contentLength: '123',
+        error: regression ? failure : null, contentType: 'text/html', contentLength: '123',
       });
     }
     store.finish(id, false);
@@ -71,5 +71,22 @@ test('closes the comparison snapshot if the destination aborts before reading', 
     stream.destroy();
     await closed;
     await vi.waitFor(() => expect(end).toHaveBeenCalledTimes(1));
+  } finally { store.close(); }
+});
+
+test('localizes known diagnostics in English Excel comparisons and preserves raw diagnostics in CSV', async () => {
+  const diagnostic = 'Истекло время ожидания ответа.';
+  const { store, projectId, baseline, target } = fixture(diagnostic);
+  try {
+    const input = { baseline, target };
+    const excel = async (locale: 'en-US' | 'ru-RU') =>
+      (await buffer(await openComparisonStream(store, projectId, input, 'excel', undefined, locale))).toString('utf8');
+    const english = await excel('en-US');
+    expect(english).toContain('Comparison · HTTP status');
+    expect(english).toContain('The request timed out while waiting for a response.');
+    expect(english).not.toContain(diagnostic);
+    expect(await excel('ru-RU')).toContain(diagnostic);
+    expect(await text(await openComparisonStream(store, projectId, input, 'csv', undefined, 'en-US')))
+      .toContain(diagnostic);
   } finally { store.close(); }
 });

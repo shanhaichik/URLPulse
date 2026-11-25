@@ -1,5 +1,7 @@
 # Architecture and contracts
 
+[Русский](architecture.ru.md) · [Developer guide](README.md)
+
 URLPulse is a local, single-user application. The React renderer uses one API client in both modes. Browser requests go over loopback HTTP. Electron serves the UI at `pulse-app://app/` and sends allowed requests through a sandboxed preload bridge to Fastify’s in-process `inject()` interface.
 
 ```mermaid
@@ -21,11 +23,17 @@ flowchart TD
     worker --> smtp[Optional SMTP delivery]
 ```
 
-`main.ts` in each runtime prepares the profile, claims the database, and starts the catalog and background services. The web host listens on loopback and stops on SIGINT or SIGTERM. The desktop host owns the window, tray, report links, and file access. Closing its window hides it, allowing background work to continue. **Выход** drains work and closes the database. [Web entry point](../../src/server/main.ts) · [Desktop entry point](../../src/desktop/main.ts)
+`main.ts` in each runtime prepares the profile, claims the database, and starts the catalog and background services. The web host listens on loopback and stops on SIGINT or SIGTERM. The desktop host owns the window, tray, report links, and file access. Closing its window hides it, allowing background work to continue. **Quit** drains work and closes the database. [Web entry point](../../src/server/main.ts) · [Desktop entry point](../../src/desktop/main.ts)
 
 React stores current UI state in hooks, keeps navigation and applied filters in the URL, and refreshes progress through polling. Project summary requests can send the last `revision` as `since` and receive `{ unchanged: true }`. Durable state lives in SQLite. The API validates inputs before handing work to the store or catalog. Long database operations use a worker and streaming exports use read snapshots so concurrent changes do not alter an in-flight export. [`src/client/api.ts`](../../src/client/api.ts) · [`src/server/app.ts`](../../src/server/app.ts) · [`database-tasks.ts`](../../src/server/database-tasks.ts)
 
 The run worker claims queued checks, resolves their saved request policy, runs checks in bounded batches, and persists results and counters. Check failures become per-URL results with diagnostic fields. Finishing a run can enqueue a notification and email. On ordinary restart, interrupted running checks are requeued and interrupted email sends are recorded as uncertain. [`worker.ts`](../../src/server/worker.ts) · [`store.ts`](../../src/server/store.ts)
+
+## Language settings
+
+The browser and Electron bundle `ru-RU` and `en-US` catalogs. The renderer updates copy and formatting through a root language subscription, preserving navigation and task state. The web app stores `urlpulse.locale` in browser storage and synchronizes tabs on the same origin. Electron stores the language in its profile preferences and updates the menu, tray, and app-provided dialog captions.
+
+SQLite keeps original diagnostics and stable machine fields. The UI translates recognized diagnostics at render time, including relevant historical results. A report export captures the requested locale once. The email worker reads the language for the whole installation from `PULSE_EMAIL_LOCALE` on web or from Electron's `emailLocale` preference independently of the current window. [Translation guide](../localization/TRANSLATION_GUIDE.en.md) · [Catalog source](../../src/shared/i18n/)
 
 ## Repository layout
 
@@ -105,12 +113,12 @@ These are the application’s internal UI contracts. The web server binds to `12
 | `GET /api/projects/:projectId/runs/:runId` | Report with `{ run, results, previousRun, nextAfter, restart }`. Accepts `after` and the filters `q`, `status`, `httpCode`, and `change`. |
 | `POST /api/projects/:projectId/runs/:runId/stop` and `POST …/runs/:runId/restart` | Stop the run and return its resulting state, or enqueue a new run from a stopped run and return `202` with `{ id }`. |
 | `GET /api/projects/:projectId/run-comparison` | Requires distinct `baseline` and `target` run IDs in the project with completed checks in a `done` or `cancelled` run. Use `view=summary` for counts or omit `view` for `{ items, nextAfter }`. Optional `q`, `kind`, and `after` filter or page the results. |
-| `GET /api/projects/:projectId/export`, `GET …/runs/:runId/export`, `GET …/urls/:urlId/export`, `GET …/groups/:groupId/export`, `GET …/run-comparison/export` | Stream downloads with `format=csv`, `excel`, or `json`. Project, run, URL, and group exports use applicable report filters. Comparison export takes the comparison run IDs and filters. Paths abbreviated with `…` share the project prefix. |
+| `GET /api/projects/:projectId/export`, `GET …/runs/:runId/export`, `GET …/urls/:urlId/export`, `GET …/groups/:groupId/export`, `GET …/run-comparison/export` | Stream downloads with `format=csv`, `excel`, or `json`. For Excel, `locale=en-US` selects English and `ru-RU` is the default. CSV and JSON retain machine fields. Project, run, URL, and group exports use applicable report filters. Comparison export takes the comparison run IDs and filters. |
 | `GET /api/projects/:projectId/catalog`, `GET …/catalog/page`, `POST …/catalog/imports` | Read source and job summaries, page catalog rows, or enqueue an import. File imports send bytes with `PUT …/catalog/imports/:jobId/file` and `Content-Type: application/octet-stream`. [Catalog routes](../../src/server/catalog/routes.ts) |
 | `GET /api/projects/:projectId/request-profiles` | Returns `{ profiles, secretMode }`. Read an address override with `GET …/urls/:urlId/request-profile`. Set it with `PATCH` to the same path and JSON `{ profileId }`, where the value is `'inherit'`, `null` for direct routing, or a saved profile ID. |
 | `GET`, `PUT`, or `DELETE /api/projects/:projectId/proxy-pac` and `POST …/proxy-pac/test` | Read, set, or clear the active PAC. `PUT` takes `{ filename, source }` with a `.pac` name and source up to 256 KiB. These methods return `{ pac }` with metadata or `null`. The test takes `{ url }` and returns `{ routes, source }`. |
 
-Application errors use JSON `{ error: string }` with localized messages. Typical statuses are `400` for invalid input, `401` for missing or invalid session credentials, `403` for a disallowed host or origin, `404` for a missing project or record, `409` for state conflicts, `413` for size limits, and `503` for a busy database. At the check level, an unreachable target is described in a result with `status: "error"`.
+Application errors keep the JSON `{ error: string }` field. Requests with `x-urlpulse-i18n: 1` retain the original error text and can also receive a `messageKey` and validated `messageParams`. Direct Excel downloads with `locale=en-US` receive known errors in English. Typical statuses are `400` for invalid input, `401` for invalid or missing session credentials, `403` for a disallowed host or origin, `404` for a missing record, `409` for a state conflict, `413` for a size limit, and `503` for a busy database. Check failures are stored with `status: "error"` in the corresponding URL result. Paths abbreviated with `…` share the project prefix.
 
 Run this read-only example in the browser console after opening a valid session. It prints the first project’s first report page when run history exists.
 
@@ -131,15 +139,16 @@ if (projects.length) {
 
 ## Electron IPC
 
-The renderer uses `window.pulseDesktop` from the preload script and the `DesktopBridge` contract. The main process validates the sender, frame, and channel arguments. `pulse:request` accepts `{ path, method, body? }` with an allowlisted API method and path and an optional JSON string. It returns `{ status, data }`. While shutting down, the request channel returns `503` with `code: "desktop-shutdown"` so the renderer can stop polling. For a new API route used through this bridge, update the route allowlist and cover the validation rules in the contract tests. [Bridge types](../../src/shared/desktop.ts) · [Preload](../../src/desktop/preload.cts) · [Request validator](../../src/desktop/contracts.ts)
+The renderer uses `window.pulseDesktop` from the preload script and the `DesktopBridge` contract. The main process validates the sender, frame, and channel arguments. `pulse:request` accepts `{ path, method, body?, i18n? }` with an allowlisted API method and path and an optional JSON string. Set `i18n: true` to request structured diagnostics. It returns `{ status, data }`. While shutting down, the request channel returns `503` with `code: "desktop-shutdown"` so the renderer can stop polling. For a new API route used through this bridge, update the route allowlist and cover the validation rules in the contract tests. [Bridge types](../../src/shared/desktop.ts) · [Preload](../../src/desktop/preload.cts) · [Request validator](../../src/desktop/contracts.ts)
 
 | Channels | Arguments and result |
 | --- | --- |
 | `pulse:open-address` | Project and URL IDs. Resolves the stored HTTP(S) address and opens it in the user’s browser. |
-| `pulse:export-report`, `pulse:export-comparison`, `pulse:export-catalog` | Accept a report scope path plus format and filters, a project ID plus comparison and format, or a project ID plus catalog filter and optional selection, respectively. Use a native save dialog and return `{ saved: true }` or `{ saved: false, error? }`. A report scope path is the resource path without `/export`. |
+| `pulse:export-report`, `pulse:export-comparison`, `pulse:export-catalog` | Report export accepts a scope path without `/export`, format, optional filters, and optional locale. Comparison export accepts a project ID, comparison input, format, and optional locale. Catalog export accepts a project ID, filter, and optional selection. All use a native dialog and return `{ saved: true }` or `{ saved: false, error? }`. |
 | `pulse:pick-catalog` | Project ID and optional source ID. Opens the file chooser and returns `{ sourceId }` or `null` on cancellation. |
 | `pulse:export-backup`, `pulse:import-backup`, `pulse:backup-progress` | Export returns the save result. Restore returns a boolean and emits `copy`, `validate`, `prepare`, and `replace` progress events, followed by `null` when progress clears. A successful restore relaunches the app. |
-| `pulse:get-preferences`, `pulse:save-preferences` | Read current preferences or save the `background` or `smtp` section. The read model exposes SMTP `hasPassword` without the password. A save returns updated preferences and can include a `loginError`. |
+| `pulse:get-preferences`, `pulse:save-preferences` | Read preferences or save the `background`, `smtp`, or `email-language` section. The read model exposes SMTP `hasPassword` and the email language. A save returns updated preferences and can include a `loginError`. |
+| `pulse:get-locale`, `pulse:set-locale`, `pulse:locale-changed` | Read or set the interface locale. The main process accepts `ru-RU` or `en-US` and emits an event when it changes. |
 | `pulse:navigation-ready`, `pulse:navigate` | A renderer handshake and main-process event for links such as `pulse-url://report/?project=1&run=2`. The navigation event carries a UI-relative path. |
 
 Native file operations are serialized through a single dialog task. Invalid requests reject with an IPC error. A canceled save returns `{ saved: false }` and a filesystem write failure can include a user-facing `error` in that result. [IPC handlers](../../src/desktop/main.ts)

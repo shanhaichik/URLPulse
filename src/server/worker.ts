@@ -10,12 +10,15 @@ import { configurationFailure, profileReferences, releaseRequestSecrets, resolve
   type SavedRequestProfile } from './request-profiles.js';
 import { envRequestSecrets, type RequestSecrets } from './request-secrets.js';
 import { ApiError, type EmailJob, type Store } from './store.js';
+import { createTranslator, formatLocaleNumber, parseLocale, type AppLocale } from '../shared/i18n/index.js';
+import { emailMessages } from '../shared/i18n/locales/email.js';
 
 export type SendEmail = (job: EmailJob) => Promise<void>;
 export type CheckUrl = (url: string, profile: TlsProfile, signal: AbortSignal, options?: ResolvedRequestOptions,
   pac?: PacRouteResolver) => Promise<CheckResult>;
 
-export function smtpSender(env: NodeJS.ProcessEnv, origin: string): SendEmail | undefined {
+export function smtpSender(env: NodeJS.ProcessEnv, origin: string, preferred: AppLocale | (() => AppLocale) =
+  parseLocale(env.PULSE_EMAIL_LOCALE)): SendEmail | undefined {
   const host = env.SMTP_HOST;
   if (!host) return undefined;
   const mode = env.SMTP_TLS_MODE || 'starttls';
@@ -33,10 +36,13 @@ export function smtpSender(env: NodeJS.ProcessEnv, origin: string): SendEmail | 
     disableFileAccess: true, disableUrlAccess: true,
   });
   return async job => {
+    const locale = parseLocale(typeof preferred === 'function' ? preferred() : preferred);
+    const t = createTranslator(locale, 'email', emailMessages);
     const report = `${origin}/?project=${job.projectId}&run=${job.runId}`;
+    const count = (value: number) => formatLocaleNumber(locale, value);
     await transport.sendMail({
-      from, to: job.email, messageId: job.messageId, subject: `Пульс URL · ${job.projectName}`,
-      text: `Проверка завершена.\nДоступно: ${job.available} из ${job.total}.\nС ошибками: ${job.failures}.\n\nОтчёт на компьютере с запущенным Пульсом URL: ${report}`,
+      from, to: job.email, messageId: job.messageId, subject: t('subject', { project: job.projectName }),
+      text: t('body', { report, available: count(job.available), total: count(job.total), failures: count(job.failures) }),
     });
   };
 }
