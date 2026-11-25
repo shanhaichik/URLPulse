@@ -2,16 +2,13 @@
 
 [Русский](CHANGELOG.md)
 
-## Unreleased
-
-- Project PAC now applies to sitemap imports in URLs and Catalog. Project-specific trusted proxies support corporate IP addresses, hostname CONNECT, and Basic over HTTPS. Catalog jobs capture the PAC revision when queued.
-
 ## 1.6.0
 
 - English and Russian interfaces in the browser and Electron. Switch languages immediately and keep the selection across launches. Electron menus, the tray, and app-provided dialog captions follow the selection.
 - CSV for Excel follows the interface language for headings, comparison labels, and known diagnostics. CSV and JSON retain their existing structure.
 - Set one email language for all projects in Electron settings or through `PULSE_EMAIL_LOCALE` in the web server. Russian is the default.
 - Updated guides, screenshots, and the demo for both languages. Added translation instructions and catalog checks.
+- Project PAC now applies to sitemap imports in URLs and Catalog. Project-specific trusted proxies support corporate IP addresses, hostname CONNECT, and Basic over HTTPS. Catalog jobs capture the PAC revision when queued.
 
 See the [user guide](docs/user/README.en.md) and [localization report](docs/localization/FINAL_REPORT.en.md).
 
